@@ -1,0 +1,10 @@
+name: "CodeQL config for dashboard"
+
+queries:
+  - uses: security-and-quality
+
+paths-ignore:
+  - node_modules
+  - tmp
+  - .trash
+  - .worktrees
