@@ -37,10 +37,11 @@ installed"; an empty source renders its own empty state instead.
 
 ## Install
 
-Prerequisites: Bitty `>=0.0.26,<0.1` and Plugin API `^1.0`. The 0.0.26 floor is
+Prerequisites: Bitty `>=0.0.26` and Plugin API `^1.0`. The 0.0.26 floor is
 the first release train that ships `bitty.runtime.inspect()`; an older host
 rejects the manifest at install time instead of activating a panel with no
-data.
+data. There is no declared ceiling: a newer host is admitted rather than
+failed closed by an upper bound.
 
 From the registry (once the entry is merged) or directly from this repository:
 

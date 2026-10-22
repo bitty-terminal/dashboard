@@ -34,7 +34,9 @@ describe("bitty-plugin.toml", () => {
     expect(model.name).toBe("Dashboard");
     expect(model.version).toBe("0.0.1");
     expect(model.pluginApiRange).toBe("^1.0");
-    expect(manifestSource).toContain('bitty = ">=0.0.26,<0.1"');
+    expect(manifestSource).toContain('bitty = ">=0.0.26"');
+    // Minimum-only: a declared ceiling would reject newer compatible hosts.
+    expect(manifestSource).not.toMatch(/bitty = ">=0\.0\.26,/);
   });
 
   test("requests exactly the two least-privilege grants", () => {
