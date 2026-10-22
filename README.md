@@ -73,9 +73,9 @@ hints: the Plugin API v1 has no viewport-size surface, so they bound row
 truncation and page size, while the host clips the painted panel to the live
 window.
 
-```sh
-bitty command bitty-terminal.dashboard:toggle_dashboard
-```
+There is no standalone CLI verb for plugin commands: bind the command as a
+`command:` keymap action (below), or invoke it from an existing binding. The
+CLI verb `bitty cmd` addresses terminal commands, not plugin commands.
 
 ## Configuration
 
