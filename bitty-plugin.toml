@@ -1,0 +1,58 @@
+# Bitty plugin manifest.
+#
+# File name, keys, and limits are the accepted v1 contract in bitty-docs
+# `docs/specifications/plugin-platform-rfc.md` (OQ-012). The plugin manager and
+# the host parse this file independently before any plugin code runs.
+#
+# `just manifest` validates this file with the authoritative
+# `bitty-plugin-lint` from bitty-plugin-sdk, pinned by commit in `package.json`
+# and `bun.lock`; `just docs` runs the SDK README contract checker.
+
+[plugin]
+id = "bitty-terminal.dashboard"
+name = "Dashboard"
+version = "0.0.1"
+description = "Read-only configuration and status dashboard: runtime, plugins, extensions, settings, profiles, and diagnostics in one panel."
+license = "MIT"
+
+[compat]
+# `bitty.runtime.inspect()` is the read-only snapshot this panel is built on
+# (bitty#2396, merged in bitty#2410); the first release train that ships it is
+# 0.0.26. The host resolves both ranges before activation and fails closed on
+# a mismatch.
+bitty = ">=0.0.26,<0.1"
+plugin-api = "^1.0"
+
+[capabilities]
+# Deny by default; two grants, each exercised by code.
+#
+# - `runtime.inspect`: the only data source. `bitty.runtime.inspect()` is
+#   argument-free, read-only, bounded to 64 KiB, and returns typed
+#   `unavailable: <reason>` markers per section instead of failing the call.
+#   Nothing in this plugin reads configuration files, the ledger, or the
+#   extension roots directly.
+# - `ui.overlay.focus`: the accepted W-01 focusable-overlay plus transient
+#   input-capture grant. The dashboard presents a multi-row panel, and the
+#   host paints an `overlay`-slot block only for the plugin that owns the
+#   capture session; the spec-path `bitty.ui.overlay.acquire(spec)` mounts the
+#   surface directly, so the v1 presentation grants (`ui.rich`, `ui.overlay`)
+#   are not requested or needed.
+#
+# No `config.manage`, `runtime.configure`, `terminal.input.*`, filesystem,
+# process, network, clipboard, or debug authority. Settings writes are
+# deferred to the typed `config.manage` API (bitty#2393).
+runtime.inspect = true
+ui.overlay.focus = true
+
+[lazy]
+# Static trigger: the host registers the command without creating a VM.
+# Commands are plugin-qualified `<plugin-id>:<resource>`.
+commands = ["bitty-terminal.dashboard:toggle_dashboard"]
+# Events the plugin subscribes to during activation. The input nudge drains
+# already-queued capture events; `focus.changed` drains on a cold path; and
+# `overlay.released` clears local state when the host ends the session.
+events = [
+  "overlay.input.available",
+  "focus.changed",
+  "overlay.released",
+]

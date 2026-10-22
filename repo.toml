@@ -1,0 +1,14 @@
+# dashboard: workspace identity descriptor (kind/lang/role mirror workspace.toml).
+[repo]
+name = "dashboard"
+kind = "plugin"
+lang = "lua/ts"
+role = "independent plugin: read-only configuration and status dashboard"
+owner = "TBD"
+docs = "bitty-plugins-docs"
+
+[contracts.consumes]
+manifest-v1 = "OQ-012 plugin-platform-rfc" # bitty-plugin.toml header
+plugin-api-v1 = "ADR-0009 Lua Surface" # lua/dashboard/init.lua cites Plugin API v1
+runtime-inspect-v1 = "bitty#2396 runtime.inspect" # lua/dashboard/inspect.lua
+overlay-input-v1 = "W-01 focusable overlay and transient input capture" # lua/dashboard/init.lua

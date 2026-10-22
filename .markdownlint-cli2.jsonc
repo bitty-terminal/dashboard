@@ -1,0 +1,19 @@
+{
+  "config": {
+    "default": true,
+    "MD013": false,
+    "MD024": { "siblings_only": true },
+    "MD033": false,
+    "MD041": false,
+  },
+  "globs": ["**/*.md"],
+  "ignores": [
+    "node_modules",
+    ".worktrees",
+    "target",
+    "dist",
+    "build",
+    "site",
+    "tmp",
+  ],
+}

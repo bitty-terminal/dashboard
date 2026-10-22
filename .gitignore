@@ -1,0 +1,5 @@
+# Ignored scratch and local state for the Dashboard plugin repository.
+node_modules/
+recording/
+.worktrees/
+.carryctx/config.local.toml
