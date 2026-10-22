@@ -93,6 +93,40 @@ function M.path_tokens_are_redacted()
   end
 end
 
+function M.quoted_uri_and_relative_paths_are_redacted()
+  local json = text.redact_paths('{"path":"/home/tester/.config/bitty.toml"}')
+  if json ~= '{"path":"…"}' then
+    error("a quoted JSON path must keep the object shape: " .. json)
+  end
+  for _, case in ipairs({
+    { '{"path":"/home/tester/My Config/init.lua"}', "My Config" },
+    { "file:///home/tester/.config/bitty.toml", "/home/tester" },
+    { "file:/home/tester/.config/bitty.toml", "/home/tester" },
+    { "source=./config/bitty.toml", "config/bitty.toml" },
+    { "source=../config/bitty.toml", "config/bitty.toml" },
+  }) do
+    local value = text.redact_paths(case[1])
+    if string.find(value, case[2], 1, true) ~= nil then
+      error("path survived redaction: " .. value)
+    end
+    if string.find(value, "…", 1, true) == nil then
+      error("path was not replaced with an ellipsis: " .. value)
+    end
+  end
+  local relative = text.redact_paths("source=./config/bitty.toml")
+  if relative ~= "source=…" then
+    error("a relative path must be fully redacted: " .. relative)
+  end
+  -- Ordinary URIs and plain names stay readable.
+  local url = text.redact_paths("homepage=https://example.com/docs")
+  if url ~= "homepage=https://example.com/docs" then
+    error("an ordinary URL must stay readable: " .. url)
+  end
+  if text.redact_paths("name=work") ~= "name=work" then
+    error("a non-path token was modified")
+  end
+end
+
 function M.clamp_int_bounds()
   if text.clamp_int(nil, 24, 12, 100) ~= 24 then
     error("nil must fall back to the default")

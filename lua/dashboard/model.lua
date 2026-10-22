@@ -33,6 +33,11 @@ M.ACTION_NONE = "none"
 M.ACTION_CLOSE = "close"
 M.ACTION_REFRESH = "refresh"
 
+-- Wheel policy: a line-delta tick moves up to `WHEEL_MAX_STEP` rows, and a
+-- pixel delta (which carries no row unit) moves the bounded default step.
+M.WHEEL_STEP = 3
+M.WHEEL_MAX_STEP = 5
+
 -- One empty navigation state, anchored on the first section.
 function M.new_state()
   return { index = 1, offset = 0 }
@@ -459,30 +464,63 @@ function M.apply_key(state, event, opts)
   return current, M.ACTION_NONE, false
 end
 
--- Signed wheel step from a captured `wheel` event, clamped to a page.
+-- Parse one Core wheel payload: `wheel:Lines(x, y)` or `wheel:Pixels(x, y)`.
+-- Both components are finite decimal values; returns `nil` for any other
+-- shape so malformed input is ignored instead of guessed at.
+function M.wheel_vector(text_value)
+  if type(text_value) ~= "string" then
+    return nil
+  end
+  local number = "([%-%+]?%d*%.?%d+)"
+  local x_text, y_text = string.match(
+    text_value,
+    "^wheel:Lines%s*%(%s*" .. number .. "%s*,%s*" .. number .. "%s*%)$"
+  )
+  local pixels = false
+  if x_text == nil then
+    x_text, y_text = string.match(
+      text_value,
+      "^wheel:Pixels%s*%(%s*" .. number .. "%s*,%s*" .. number .. "%s*%)$"
+    )
+    pixels = true
+  end
+  if x_text == nil then
+    return nil
+  end
+  local x = tonumber(x_text)
+  local y = tonumber(y_text)
+  if x == nil or y == nil then
+    return nil
+  end
+  return { x = x, y = y, pixels = pixels }
+end
+
+-- Signed offset movement for one captured wheel event, clamped to a page.
 --
--- The host formats the captured payload itself (`wheel:<debug>`), so the
--- dashboard treats it as a direction hint, not as a number to trust: a
--- leading explicit magnitude (`wheel:-2`) is honoured inside the clamp, and
--- every other spelling scrolls a fixed bounded step.
+-- Core sends the platform scroll delta as `wheel:Lines(x, y)` or
+-- `wheel:Pixels(x, y)`; positive y is wheel up, so moving toward the first
+-- row is a negative offset delta. A line count supplies the magnitude; a
+-- pixel delta only supplies direction and uses the bounded default step.
 function M.wheel_delta(event, page)
   local bounded_page = text.clamp_int(page, M.DEFAULT_PAGE, 1, M.MAX_PAGE)
   local raw = type(event) == "table" and event.text or nil
-  local step = math.min(3, bounded_page)
-  local sign = 1
-  if type(raw) == "string" then
-    local explicit = string.match(raw, "^wheel:(%-?%d+)")
-    if explicit ~= nil then
-      local number = tonumber(explicit)
-      if number ~= nil and number ~= 0 then
-        sign = number < 0 and -1 or 1
-        step = math.abs(number)
-      end
-    elseif string.find(raw, "-", 1, true) ~= nil then
-      sign = -1
-    end
+  local vector = M.wheel_vector(raw)
+  if vector == nil or vector.y == 0 then
+    return 0
   end
-  return sign * text.clamp_int(step, 1, 1, 5)
+  local step = math.min(M.WHEEL_STEP, bounded_page)
+  if not vector.pixels then
+    step = text.clamp_int(
+      math.abs(vector.y),
+      M.WHEEL_STEP,
+      1,
+      math.min(M.WHEEL_MAX_STEP, bounded_page)
+    )
+  end
+  if vector.y > 0 then
+    return -step
+  end
+  return step
 end
 
 function M.apply_wheel(state, event, opts)

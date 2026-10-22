@@ -5,9 +5,12 @@
 -- (`bitty.ui.overlay.update`). This module is pure: it shapes the bounded
 -- view model into nodes and never calls the host.
 --
--- Layout contract: every rendered line is truncated to the declared width,
--- the page size is derived from the declared height, and the component always
--- carries at least one content row (empty and unavailable states included).
+-- Layout contract: the root is a `List` whose direct children are exactly one
+-- painted row each, because Core's `overlay_scene_rows` expands only the root's
+-- direct children and flattens any nested group into a single line. Every
+-- rendered line is truncated to the declared width, the page size is derived
+-- from the declared height, and the component always carries at least one
+-- content row (empty and unavailable states included).
 
 local model = require("dashboard.model")
 local text = require("dashboard.text")
@@ -17,7 +20,9 @@ local M = {}
 M.TITLE = "Dashboard"
 M.SEPARATOR = " │ "
 M.ACTIVE_FG = "accent"
-M.DIM_FG = "muted"
+-- The host token table is closed (`foreground`, `background`, `cursor`,
+-- `selection`, `accent`); `foreground` is the dimmest available choice.
+M.DIM_FG = "foreground"
 M.RULE_GLYPH = "-"
 
 local function node(kind, content)
@@ -112,6 +117,9 @@ function M.scene(view, opts)
     truncated = view.truncated,
   }
 
+  -- Direct children of the root are the painted rows. A nested `List` here
+  -- would collapse every content row into one line, because Core flattens a
+  -- non-root group horizontally instead of stacking it.
   local children = {
     node("Text", truncate(M.TITLE .. " · read-only", width)),
   }
@@ -121,7 +129,7 @@ function M.scene(view, opts)
   children[#children + 1] = tabs[1]
   children[#children + 1] = node("Text", text.fill(M.RULE_GLYPH, width))
 
-  local row_nodes = {}
+  local content_rows = 0
   for index = first, last do
     local item = view.rows[index]
     local content = truncate(item.text, width)
@@ -129,12 +137,12 @@ function M.scene(view, opts)
     if item.dim then
       child.fg = M.DIM_FG
     end
-    row_nodes[#row_nodes + 1] = child
+    children[#children + 1] = child
+    content_rows = content_rows + 1
   end
-  if #row_nodes == 0 then
-    row_nodes[1] = node("Text", truncate("No rows.", width))
+  if content_rows == 0 then
+    children[#children + 1] = node("Text", truncate("No rows.", width))
   end
-  children[#children + 1] = { kind = "List", children = row_nodes }
 
   if view.note ~= nil and view.note ~= "" then
     local note = node("Text", truncate(view.note, width))
@@ -146,26 +154,44 @@ function M.scene(view, opts)
   footer.fg = M.DIM_FG
   children[#children + 1] = footer
 
-  return { kind = "Column", children = children }
+  return { kind = "List", children = children }
 end
 
--- Plain lines, used by the behavior tests and by the diagnostic helpers. The
--- scene builder is the single source of truth: this walks the same component.
+-- Plain lines as Core paints them (`overlay_scene_rows`): a `Column`/`List`
+-- root yields one line per direct child, each child flattened horizontally
+-- (Text leaves in walk order). Nested groups never add a line, so this mirrors
+-- the host instead of assuming vertical stacking.
 function M.lines(component)
+  if type(component) ~= "table" then
+    return {}
+  end
   local lines = {}
-  local function walk(item)
+  local function flatten(item, parts)
     if type(item) ~= "table" then
       return
     end
     if item.kind == "Text" then
-      lines[#lines + 1] = item.text or ""
+      parts[#parts + 1] = item.text or ""
       return
     end
     for index = 1, #(item.children or {}) do
-      walk(item.children[index])
+      flatten(item.children[index], parts)
     end
   end
-  walk(component)
+  if component.kind == "Column" or component.kind == "List" then
+    for index = 1, #(component.children or {}) do
+      local parts = {}
+      flatten(component.children[index], parts)
+      lines[#lines + 1] = table.concat(parts)
+    end
+    if #lines == 0 then
+      lines[1] = ""
+    end
+    return lines
+  end
+  local parts = {}
+  flatten(component, parts)
+  lines[1] = table.concat(parts)
   return lines
 end
 

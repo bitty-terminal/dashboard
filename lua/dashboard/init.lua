@@ -19,7 +19,9 @@
 -- bounded wheel step. `drain` is the only place that polls; the host nudges
 -- `overlay.input.available` when bytes are queued, and a generation-owned
 -- one-shot timer re-arms itself while the panel is open so the 30 s idle
--- capture timeout does not close a panel the user is reading.
+-- capture timeout does not close a panel the user is reading. The re-arm
+-- budget is finite: an abandoned panel releases its capture at
+-- `MAX_SESSION_MS` instead of refreshing the deadline forever.
 --
 -- Settings are read-only. Writing them is deferred until the typed
 -- `config.manage` API lands (bitty#2393); the UI and README say so explicitly
@@ -44,6 +46,13 @@ M.POLL_MAX = 32
 -- the deadline even when it drains nothing.
 M.KEEPALIVE_MS = 10000
 
+-- Hard lifetime ceiling for one capture session. The keep-alive exists so a
+-- reader is not interrupted by the 30 s idle timeout, but an open-and-forgotten
+-- panel must not refresh Core's capture forever. Keep this a whole number of
+-- re-arms so the budget is deterministic without a clock surface.
+M.MAX_SESSION_MS = 600000
+M.MAX_KEEPALIVE_REARMS = math.floor(M.MAX_SESSION_MS / M.KEEPALIVE_MS)
+
 -- Presentation hints from an optional command argument. The Plugin API v1 has
 -- no viewport-size surface, so the declared layout drives truncation and page
 -- size while the host clips the painted block to the live window.
@@ -59,6 +68,7 @@ local state = {
   width = M.DEFAULT_WIDTH,
   height = M.DEFAULT_HEIGHT,
   timer = nil,
+  rearms = 0,
 }
 
 local function overlay_table()
@@ -137,6 +147,13 @@ local function arm_keepalive()
     if not state.open then
       return
     end
+    state.rearms = state.rearms + 1
+    if state.rearms >= M.MAX_KEEPALIVE_REARMS then
+      -- Budget spent: release the capture explicitly instead of keeping an
+      -- abandoned panel alive indefinitely.
+      M.close("cancelled")
+      return
+    end
     -- Polling refreshes the capture deadline; the drain only repaints when a
     -- key actually changed something.
     M.drain()
@@ -154,6 +171,7 @@ local function reset()
   state.nav = model.new_state()
   state.data = nil
   state.error = nil
+  state.rearms = 0
 end
 
 -- Paint the current view on the held session. A rejected update keeps the
@@ -206,6 +224,7 @@ function M.open(args)
   end
   state.open = true
   state.handle = handle
+  state.rearms = 0
   if not paint() then
     pcall(overlay.release, handle, "cancelled")
     reset()
@@ -239,11 +258,15 @@ function M.drain()
   end
   local overlay = overlay_table()
   if overlay == nil or type(overlay.poll) ~= "function" then
+    -- The surface vanished underneath the panel. `close` releases the capture
+    -- whenever a release surface exists and always clears local state, so Core
+    -- never keeps capturing for a panel that is no longer there.
+    M.close("cancelled")
     return false
   end
   local ok, poll = pcall(overlay.poll, state.handle, M.POLL_MAX)
   if not ok or type(poll) ~= "table" then
-    reset()
+    M.close("cancelled")
     return false
   end
   if poll.status == "released" then
@@ -271,8 +294,12 @@ function M.drain()
       changed = true
     end
   end
-  if changed then
-    paint()
+  if changed and not paint() then
+    -- A failed repaint leaves the panel stale (or the host reports the
+    -- session is gone). Release explicitly instead of keeping capture with
+    -- nothing on screen.
+    M.close("cancelled")
+    return false
   end
   return true
 end
@@ -298,6 +325,7 @@ function M.status()
     error = state.error and state.error.code or nil,
     handle = state.handle,
     timer = state.timer ~= nil,
+    rearms = state.rearms,
     width = state.width,
     height = state.height,
   }

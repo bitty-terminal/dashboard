@@ -73,8 +73,8 @@ function M.toggle_opens_paints_and_arms_one_timer()
   if not status.open or status.section ~= "overview" then
     error("unexpected status after open")
   end
-  if host.session.component.kind ~= "Column" then
-    error("the panel root must be a Column")
+  if host.session.component.kind ~= "List" then
+    error("the panel root must be a List of direct row children")
   end
 end
 
@@ -159,13 +159,20 @@ function M.captured_keys_navigate_sections_and_rows()
   end
 end
 
-function M.wheel_events_scroll()
+function M.wheel_events_scroll_with_the_core_wire_format()
   local host, plugin = load()
   host:run("toggle_dashboard", { height = 12 })
-  host:push({ type = "wheel", text = "wheel:LineDelta(0.0, 1.0)" })
+  -- Negative y is wheel down: the window moves toward later rows.
+  host:push({ type = "wheel", text = "wheel:Lines(0.0, -1.0)" })
   host:deliver("overlay.input.available", {})
-  if plugin.status().offset ~= 3 then
-    error("wheel did not scroll the section, got " .. plugin.status().offset)
+  if plugin.status().offset ~= 1 then
+    error("wheel down did not scroll the section, got " .. plugin.status().offset)
+  end
+  -- Positive y is wheel up: the window moves back toward row 1.
+  host:push({ type = "wheel", text = "wheel:Lines(0.0, 1.0)" })
+  host:deliver("overlay.input.available", {})
+  if plugin.status().offset ~= 0 then
+    error("wheel up did not scroll back, got " .. plugin.status().offset)
   end
 end
 
@@ -263,6 +270,63 @@ function M.keepalive_polls_and_rearms()
   end
 end
 
+function M.keepalive_capture_has_a_hard_lifetime_cap()
+  local host, plugin = load()
+  host:run("toggle_dashboard")
+  for _ = 1, plugin.MAX_KEEPALIVE_REARMS - 1 do
+    host:advance(plugin.KEEPALIVE_MS)
+  end
+  if not host.session.active or not plugin.status().open then
+    error("the panel closed before the keep-alive budget was spent")
+  end
+  host:advance(plugin.KEEPALIVE_MS)
+  if host.session.active then
+    error("the capture must be released when the session lifetime cap is reached")
+  end
+  if #host.releases ~= 1 or host.releases[1].reason ~= "cancelled" then
+    error("the capped session must be released as cancelled")
+  end
+  if plugin.status().open or #host.timers ~= 0 then
+    error("the capped session must clear local state and its timer")
+  end
+end
+
+function M.failed_poll_releases_the_capture()
+  local host, plugin = load()
+  host:run("toggle_dashboard")
+  host:fail_poll()
+  host:push({ type = "key", text = "j" })
+  host:deliver("overlay.input.available", {})
+  if host.session.active then
+    error("a failed poll must release the capture")
+  end
+  if #host.releases ~= 1 or host.releases[1].reason ~= "cancelled" then
+    error("a failed poll must release as cancelled")
+  end
+  if plugin.status().open or #host.timers ~= 0 then
+    error("a failed poll must clear local state and its timer")
+  end
+end
+
+function M.failed_repaint_releases_the_capture()
+  local host, plugin = load()
+  host:run("toggle_dashboard")
+  host:fail_update()
+  -- `r` always requests a repaint, so it reaches the failing update path even
+  -- when the first section fits on one page.
+  host:push({ type = "key", text = "r" })
+  host:deliver("overlay.input.available", {})
+  if host.session.active then
+    error("a failed repaint must release the capture")
+  end
+  if #host.releases ~= 1 or host.releases[1].reason ~= "cancelled" then
+    error("a failed repaint must release as cancelled")
+  end
+  if plugin.status().open or #host.timers ~= 0 then
+    error("a failed repaint must clear local state and its timer")
+  end
+end
+
 function M.layout_arguments_are_bounded()
   local host, plugin = load()
   host:run("toggle_dashboard", { width = 5000, height = -3 })
@@ -272,15 +336,72 @@ function M.layout_arguments_are_bounded()
   end
 end
 
-function M.no_configuration_surface_is_touched()
+function M.no_write_path_is_reachable()
   local host = load()
   host:run("toggle_dashboard")
-  if host.bitty.settings ~= nil or host.bitty.config ~= nil then
-    error("the mock host must not expose a configuration surface")
-  end
   local rendered = lines(host:component())
   if string.find(rendered, "config.manage", 1, true) == nil then
     error("the read-only deferral must be visible in the UI")
+  end
+
+  -- Expose real-looking write surfaces and fail loudly if the plugin reaches
+  -- for any of them while opening, navigating, refreshing, and closing.
+  local config_calls = 0
+  local function trap_config()
+    config_calls = config_calls + 1
+    error("configuration write attempted", 0)
+  end
+  host.bitty.config = { manage = trap_config, set = trap_config, write = trap_config }
+  host.bitty.settings = { set = trap_config, update = trap_config }
+
+  local io_calls = 0
+  local os_calls = 0
+  local saved_io, saved_os = _G.io, _G.os
+  _G.io = {
+    open = function()
+      io_calls = io_calls + 1
+      error("io.open attempted", 0)
+    end,
+    write = function()
+      io_calls = io_calls + 1
+      error("io.write attempted", 0)
+    end,
+    lines = function()
+      io_calls = io_calls + 1
+      error("io.lines attempted", 0)
+    end,
+  }
+  _G.os = {
+    execute = function()
+      os_calls = os_calls + 1
+      error("os.execute attempted", 0)
+    end,
+    remove = function()
+      os_calls = os_calls + 1
+      error("os.remove attempted", 0)
+    end,
+    rename = function()
+      os_calls = os_calls + 1
+      error("os.rename attempted", 0)
+    end,
+  }
+  local ok, err = pcall(function()
+    host:push({ type = "key", text = "j" })
+    host:deliver("overlay.input.available", {})
+    host:push({ type = "key", text = "r" })
+    host:deliver("overlay.input.available", {})
+    host:push({ type = "key", text = "q" })
+    host:deliver("overlay.input.available", {})
+  end)
+  _G.io, _G.os = saved_io, saved_os
+  if not ok then
+    error("a forbidden side effect was attempted: " .. tostring(err))
+  end
+  if config_calls ~= 0 or io_calls ~= 0 or os_calls ~= 0 then
+    error(string.format("side effects: config=%d io=%d os=%d", config_calls, io_calls, os_calls))
+  end
+  if host.session.active then
+    error("the panel must close cleanly after the navigation pass")
   end
 end
 

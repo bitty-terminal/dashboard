@@ -58,6 +58,8 @@ function MockHost.new(options)
   end
   self.snapshot = options.snapshot
   self.inspect_error = options.inspect_error
+  self.poll_error = options.poll_error
+  self.update_error = options.update_error
   self.inspect_calls = 0
   self.safe_mode = options.safe_mode == true
   self.commands = {}
@@ -188,6 +190,9 @@ function MockHost:build()
     return self.session.handle
   end
   overlay.update = function(handle, component)
+    if self.update_error ~= nil then
+      error(self.update_error, 0)
+    end
     self:require("ui.overlay.focus")
     if self.session == nil or not self.session.active then
       fail("runtime", "E_UI_NOT_OWNER", "no live capture session")
@@ -203,6 +208,9 @@ function MockHost:build()
     return true
   end
   overlay.poll = function(handle, max)
+    if self.poll_error ~= nil then
+      error(self.poll_error, 0)
+    end
     self:require("ui.overlay.focus")
     if self.session == nil then
       fail("runtime", "E_UI_NOT_OWNER", "no session")
@@ -264,6 +272,22 @@ end
 
 function MockHost:component()
   return self.session and self.session.component or nil
+end
+
+-- Fault injection for the release-on-error paths. A failed call raises a
+-- typed table exactly like the bridge does, so the plugin's `pcall` wrapper
+-- sees the same shape it sees in production.
+function MockHost:fail_poll(error_value)
+  self.poll_error = error_value or { class = "runtime", code = "E_UI_POLL", message = "poll failed" }
+end
+
+function MockHost:fail_update(error_value)
+  self.update_error = error_value or { class = "runtime", code = "E_UI_UPDATE", message = "update failed" }
+end
+
+function MockHost:clear_faults()
+  self.poll_error = nil
+  self.update_error = nil
 end
 
 function MockHost:deliver(kind, payload)

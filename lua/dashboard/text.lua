@@ -111,10 +111,80 @@ function M.is_path_token(token)
   return drive ~= nil
 end
 
+-- Characters that separate one free-text value from the next: whitespace,
+-- `key=value` separators, JSON punctuation, and shell-ish delimiters. A path
+-- may start right after any of them.
+local PATH_BOUNDARY = {
+  [" "] = true,
+  ["\t"] = true,
+  ["\n"] = true,
+  ["\r"] = true,
+  ["="] = true,
+  ["("] = true,
+  [","] = true,
+  [";"] = true,
+  [":"] = true,
+  ['"'] = true,
+  ["'"] = true,
+  ["{"] = true,
+  ["}"] = true,
+  ["["] = true,
+  ["]"] = true,
+  ["<"] = true,
+  [">"] = true,
+}
+
+-- Characters that end an unquoted path token. A quoted path ends at its own
+-- closing quote instead, so a host path containing spaces stays covered.
+local PATH_STOP = {
+  [" "] = true,
+  ["\t"] = true,
+  ["\n"] = true,
+  ["\r"] = true,
+  ['"'] = true,
+  ["'"] = true,
+  ["}"] = true,
+  ["]"] = true,
+  [")"] = true,
+  [","] = true,
+  [";"] = true,
+  [">"] = true,
+}
+
+-- Candidate token at `index`, up to the next whitespace. Shape detection only;
+-- the redaction scan owns the real end position.
+local function path_candidate(value, index)
+  return string.match(string.sub(value, index), "^[^%s]+") or ""
+end
+
+-- Whether a path-shaped token starts at `index`. The accepted token forms live
+-- in `is_path_token`; this adds quoted/JSON boundaries, `./`/`../` relatives,
+-- and the `file:` URI wrapper.
+local function starts_path(value, index)
+  local candidate = path_candidate(value, index)
+  if M.is_path_token(candidate) then
+    -- Keep an ordinary URL readable: `https://` is a URI, not a local path.
+    local before = string.sub(value, 1, index - 1)
+    if string.sub(candidate, 1, 2) == "//" and string.match(before, "%a+:$") ~= nil then
+      return false
+    end
+    return true
+  end
+  if string.sub(candidate, 1, 5) == "file:" then
+    local target = string.sub(candidate, 6)
+    if string.sub(target, 1, 2) == "//" then
+      target = string.sub(target, 3)
+    end
+    return M.is_path_token(target) or string.sub(candidate, 1, 7) == "file://"
+  end
+  return false
+end
+
 -- Replace path-shaped substrings with `…`. Setting values and host detail
 -- strings are free text, so the dashboard never assumes a field is path-free
 -- just because it is not named like a path. A path starts at the beginning of
--- the value or after whitespace, `=`, `(`, or `,`, and runs to the next space.
+-- the value or after a boundary (whitespace, `=`, `,`, `:`, quotes, braces),
+-- and runs to the next boundary; a quoted path runs to its closing quote.
 function M.redact_paths(value)
   if type(value) ~= "string" then
     return ""
@@ -123,32 +193,33 @@ function M.redact_paths(value)
   local length = #value
   local index = 1
   local at_start = true
+  local quote = nil
   while index <= length do
     local char = string.sub(value, index, index)
-    local path_start = at_start
-      and (
-        char == "/"
-        or (char == "~" and string.sub(value, index + 1, index + 1) == "/")
-        or (
-          string.match(char, "%a") ~= nil
-          and string.sub(value, index + 1, index + 1) == ":"
-          and (
-            string.sub(value, index + 2, index + 2) == "/"
-            or string.sub(value, index + 2, index + 2) == "\\"
-          )
-        )
-      )
-    if path_start then
+    if at_start and starts_path(value, index) then
       out[#out + 1] = "…"
-      while index <= length and string.sub(value, index, index) ~= " " do
-        index = index + 1
+      if quote ~= nil then
+        while index <= length and string.sub(value, index, index) ~= quote do
+          index = index + 1
+        end
+      else
+        while index <= length and not PATH_STOP[string.sub(value, index, index)] do
+          index = index + 1
+        end
       end
       at_start = false
     else
       out[#out + 1] = char
-      if char == " " then
+      if char == '"' or char == "'" then
+        if quote == nil then
+          if at_start then
+            quote = char
+          end
+        elseif quote == char then
+          quote = nil
+        end
         at_start = true
-      elseif char == "=" or char == "(" or char == "," then
+      elseif PATH_BOUNDARY[char] then
         at_start = true
       else
         at_start = false

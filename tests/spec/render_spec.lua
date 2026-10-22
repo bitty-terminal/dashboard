@@ -42,13 +42,29 @@ local function assert_width(component, width)
   end)
 end
 
-local function content_rows(component)
-  local rows = 0
-  walk(component, function(node)
-    if node.kind == "List" then
-      rows = rows + #node.children
+-- Mirrors Core's `overlay_scene_rows`: a `Column`/`List` root paints one row
+-- per DIRECT child and flattens each child horizontally. Nested groups never
+-- add a row — the exact behavior a recursive walk would hide.
+local function flatten_child(node)
+  local parts = {}
+  local function collect(item)
+    if item.kind == "Text" then
+      parts[#parts + 1] = item.text
+      return
     end
-  end)
+    for index = 1, #(item.children or {}) do
+      collect(item.children[index])
+    end
+  end
+  collect(node)
+  return table.concat(parts)
+end
+
+local function core_rows(component)
+  local rows = {}
+  for index = 1, #(component.children or {}) do
+    rows[#rows + 1] = flatten_child(component.children[index])
+  end
   return rows
 end
 
@@ -57,10 +73,15 @@ function M.every_section_renders_at_80x24()
     local component = frame(index, { width = 80, height = 24 })
     assert_component(component)
     assert_width(component, 80)
-    if content_rows(component) < 1 then
+    if component.kind ~= "List" then
+      error("the overlay root must be a List, got " .. tostring(component.kind))
+    end
+    local rows = core_rows(component)
+    -- title + tabs + rule + at least one content row + footer.
+    if #rows < 5 then
       error("section " .. index .. " rendered no content rows")
     end
-    if content_rows(component) > model.page_size(24) then
+    if #rows > 3 + model.page_size(24) + 2 then
       error("section " .. index .. " overflows the 24-line layout")
     end
     local lines = render.lines(component)
@@ -78,9 +99,46 @@ function M.every_section_renders_at_120x40()
     local component = frame(index, { width = 120, height = 40 })
     assert_component(component)
     assert_width(component, 120)
-    if content_rows(component) < 1 or content_rows(component) > model.page_size(40) then
+    local rows = core_rows(component)
+    if #rows < 5 or #rows > 3 + model.page_size(40) + 2 then
       error("section " .. index .. " row count is out of bounds at 120x40")
     end
+  end
+end
+
+function M.overlay_direct_children_are_separate_rows()
+  -- Core stacks only a root List/Column's direct children. A nested List would
+  -- collapse every content row into one line, so this mirrors the host's
+  -- flattening (not a recursive line walk) and checks the rows individually.
+  local index = model.section_index("plugins")
+  local data = inspect.normalize(snapshot.full())
+  local view = model.build(data, { index = index, offset = 0 }, { height = 24 })
+  view.offset = 0
+  local component = render.scene(view, { width = 80, height = 24 })
+  local rows = core_rows(component)
+  local expected = 3 + #view.rows + 1 -- title, tabs, rule, content, footer
+  if #rows ~= expected then
+    error(string.format("expected %d painted rows, got %d", expected, #rows))
+  end
+  if string.find(rows[2], "Overview", 1, true) == nil or string.find(rows[2], "Diagnostics", 1, true) == nil then
+    error("the tabs Row must flatten onto exactly one painted row: " .. rows[2])
+  end
+  if string.find(rows[2], "│", 1, true) == nil then
+    error("the tab separator must join cells on the same row")
+  end
+  if rows[3] ~= string.rep(render.RULE_GLYPH, 80) then
+    error("the rule must be its own row")
+  end
+  -- The first plugin content row is addressable on its own, not fused with
+  -- its neighbours or with the footer.
+  if string.find(rows[4], "v0.0.1", 1, true) == nil then
+    error("the first content row is not separately addressable: " .. rows[4])
+  end
+  if string.find(rows[4], "Unified Bar", 1, true) ~= nil then
+    error("multiple content rows collapsed into one painted row")
+  end
+  if string.find(rows[#rows], "q close", 1, true) == nil then
+    error("the footer must be its own final row")
   end
 end
 

@@ -17,8 +17,8 @@ no process or network authority.
 > Status: the dashboard is read-only by design. Editing settings, toggling
 > plugins, and switching profiles are **not implemented** and are explicitly
 > deferred until the typed `config.manage` API (bitty#2393) lands with its
-> security review. The panel states this in its own footer; nothing here
-> writes configuration.
+> security review. The panel title and its read-only note state this; nothing
+> here writes configuration.
 
 Sections:
 
@@ -122,9 +122,11 @@ While the panel is open it owns a transient input capture, so its own keys are:
 0.0.26 have no `bitty.runtime.inspect()` and reject the manifest. Then confirm
 the plugin is enabled and granted in `bitty plugin list`.
 
-**The panel reports `E_CAPABILITY_DENIED`.** The host denied
-`bitty.runtime.inspect` or `ui.overlay.focus`. Re-grant with
-`bitty plugin install bitty-terminal.dashboard --yes`, or check
+**The panel shows `unavailable` or does not open.** The host denied
+`bitty.runtime.inspect` or `ui.overlay.focus`. A denied snapshot still opens
+the panel and renders `unavailable: <reason>` in each section; a denied overlay
+grant (or safe mode) keeps the panel closed and the command returns `false`.
+Re-grant with `bitty plugin install bitty-terminal.dashboard --yes`, or check
 `bitty plugin info bitty-terminal.dashboard` for the recorded grant set.
 
 **A section shows `unavailable: source unavailable`.** That section's host
@@ -136,9 +138,11 @@ the overlay capture at a time. Close the command palette or composer first.
 
 **The panel closes by itself.** The host ends an overlay capture after 30 s
 without activity. While the panel is open it re-arms a generation-owned timer
-that polls the session to stay alive; if the host refuses timers
-(`E_BUDGET_TIMER`) or the plugin is suspended, the transient capture timeout
-applies and the next toggle reopens.
+that polls the session to stay alive. That budget is finite: a session is
+released after ten minutes even without input, so an abandoned panel cannot
+hold capture indefinitely; open it again to continue. If the host refuses
+timers (`E_BUDGET_TIMER`) or the plugin is suspended, the transient capture
+timeout applies instead.
 
 **Clicking tabs does nothing.** Captured pointer presses carry no coordinates,
 and the host does not route overlay click/scroll bindings yet. Keyboard and
@@ -175,10 +179,11 @@ with the SDK-pinned `bitty-plugin-lint`, validates this README against the SDK
 user-documentation contract, parses every Lua source with `luac5.4 -p` (plus a
 fail-closed parser control), and runs two suites:
 
-- `lua5.4 tests/run.lua` — 65 behavior checks over display bounds, snapshot
-  normalization, section rows, both layouts (80×24 and 120×40), key and wheel
-  navigation, the overlay lifecycle against an in-process host stub, and
-  leak checks for host paths and command identifiers.
+- `lua5.4 tests/run.lua` — 70 behavior checks over display bounds, snapshot
+  normalization, path redaction, section rows, both layouts (80×24 and
+  120×40), direct-child overlay flattening, key and wheel navigation, the
+  overlay lifecycle and its error/timeout release paths against an in-process
+  host stub, and leak checks for host paths and command identifiers.
 - `bun test tests/manifest.test.ts` — the manifest validator, the exact
   capability set, the lazy command and event set, and the README contract.
 
@@ -202,11 +207,13 @@ Layout:
 - Overlay pointer routing is not part of the accepted host contract yet, so
   tab clicks are not delivered. The wheel is captured and works.
 - The panel is transient by host contract: it owns input capture while open and
-  releases on `q`/`Esc`, focus switch, unload, or activity timeout.
+  releases on `q`/`Esc`, focus switch, unload, activity timeout, the ten-minute
+  keep-alive ceiling, or a failed poll/repaint.
 
 ## Security
 
 Report vulnerabilities through the process in the umbrella project's security
 policy rather than a public issue. This plugin contains no credentials, no
 install-time execution, and no ambient authority. Treat the runtime snapshot as
-untrusted data: it is bounded, sanitized, and path-redacted before rendering.
+untrusted data: it is bounded, sanitized, and path-shaped tokens are redacted
+before rendering.

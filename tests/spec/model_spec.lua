@@ -267,24 +267,41 @@ function M.unknown_events_are_ignored()
   end
 end
 
-function M.wheel_scrolls_one_bounded_step()
-  local state = model.new_state()
+function M.wheel_uses_the_signed_y_component()
   local opts = { row_count = 40, page = 10 }
-  state = model.apply_wheel(state, { type = "wheel", text = "wheel:LineDelta(0.0, 1.0)" }, opts)
-  if state.offset ~= 3 then
-    error("a positive wheel tick must scroll three rows, got " .. state.offset)
+  local function at(offset, text_value)
+    return model.apply_wheel({ index = 1, offset = offset }, { type = "wheel", text = text_value }, opts).offset
   end
-  state = model.apply_wheel(state, { type = "wheel", text = "wheel:LineDelta(0.0, -1.0)" }, opts)
-  if state.offset ~= 0 then
-    error("a negative wheel tick must scroll back")
+  -- Core sends the platform delta as `wheel:Lines(x, y)`; positive y is wheel
+  -- up, so the window moves toward row 1 (a negative offset movement).
+  if at(5, "wheel:Lines(0,1)") ~= 4 then
+    error("Lines(0,1) must scroll up one row, got " .. at(5, "wheel:Lines(0,1)"))
   end
-  state = model.apply_wheel(state, { type = "wheel", text = "wheel:-2" }, opts)
-  if state.offset ~= 0 then
-    error("an explicit negative magnitude must clamp at the first row")
+  if at(5, "wheel:Lines(0.0, 1.0)") ~= 4 then
+    error("the Debug-formatted Lines payload must parse identically")
   end
-  state = model.apply_wheel(state, { type = "wheel", text = "wheel:9" }, opts)
-  if state.offset ~= 5 then
-    error("the wheel magnitude must clamp to five rows, got " .. state.offset)
+  if at(5, "wheel:Lines(0,-1)") ~= 6 then
+    error("Lines(0,-1) must scroll down one row")
+  end
+  -- A pixel delta carries direction only; y=2 is still wheel up.
+  if at(5, "wheel:Pixels(-1,2)") ~= 2 then
+    error("Pixels(-1,2) must scroll up one bounded step")
+  end
+  if at(5, "wheel:Pixels(0.0, -42.5)") ~= 8 then
+    error("a negative pixel delta must scroll down one bounded step")
+  end
+  -- A line magnitude is honoured inside the bounded step (positive y = up).
+  if at(10, "wheel:Lines(0,4)") ~= 6 then
+    error("Lines(0,4) must scroll up four rows, got " .. at(10, "wheel:Lines(0,4)"))
+  end
+  if at(20, "wheel:Lines(0,9)") ~= 15 then
+    error("a line magnitude must clamp to five rows, got " .. at(20, "wheel:Lines(0,9)"))
+  end
+  -- Zero and malformed payloads never move the window.
+  for _, raw in ipairs({ "wheel:Lines(0,0)", "wheel:garbage", "wheel:LineDelta(0.0, 1.0)" }) do
+    if at(5, raw) ~= 5 then
+      error("malformed or zero wheel payload moved the offset: " .. raw)
+    end
   end
 end
 
