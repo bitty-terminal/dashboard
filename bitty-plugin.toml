@@ -18,9 +18,11 @@ license = "MIT"
 [compat]
 # `bitty.runtime.inspect()` is the read-only snapshot this panel is built on
 # (bitty#2396, merged in bitty#2410); the first release train that ships it is
-# 0.0.26. The host resolves both ranges before activation and fails closed on
-# a mismatch.
-bitty = ">=0.0.26,<0.1"
+# 0.0.26, so that is the floor. Compatibility is minimum-only: there is no
+# declared ceiling, so a newer host is admitted instead of being rejected
+# before it can run the plugin. The host resolves both requirements before
+# activation and fails closed on a mismatch.
+bitty = ">=0.0.26"
 plugin-api = "^1.0"
 
 [capabilities]
