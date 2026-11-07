@@ -9,6 +9,7 @@
 -- Settings, Profiles, Diagnostics. "Extensions" names the installable
 -- artifacts; the word "components" never appears in user-facing text.
 
+local edit = require("dashboard.edit")
 local text = require("dashboard.text")
 
 local M = {}
@@ -26,8 +27,13 @@ M.DEFAULT_PAGE = 10
 M.MAX_PAGE = 20
 M.MIN_PAGE = 3
 
-M.READ_ONLY_NOTE = "Read-only: settings editing is deferred until config.manage (bitty#2393)."
-M.OVERVIEW_NOTE = "Read-only. Settings editing is deferred until config.manage (bitty#2393)."
+M.READ_ONLY_NOTE = "Read-only: config.manage is not granted (or this host has no writable user layer)."
+M.OVERVIEW_NOTE = "Read-only. config.manage is not granted (or this host has no writable user layer)."
+M.OVERVIEW_EDITABLE_NOTE = "Settings, plugins, and profiles are editable from their tabs."
+
+M.ACTION_HINT_SETTINGS = "Enter edit"
+M.ACTION_HINT_PLUGINS = "Space toggle"
+M.ACTION_HINT_PROFILES = "Enter use"
 
 M.ACTION_NONE = "none"
 M.ACTION_CLOSE = "close"
@@ -38,9 +44,17 @@ M.ACTION_REFRESH = "refresh"
 M.WHEEL_STEP = 3
 M.WHEEL_MAX_STEP = 5
 
--- One empty navigation state, anchored on the first section.
+-- One empty navigation state, anchored on the first section and row.
 function M.new_state()
-  return { index = 1, offset = 0 }
+  return { index = 1, offset = 0, cursor = 0 }
+end
+
+-- Largest 0-based row index for a section with `row_count` rows.
+function M.max_cursor(row_count)
+  if row_count <= 0 then
+    return 0
+  end
+  return row_count - 1
 end
 
 function M.section_count()
@@ -149,7 +163,7 @@ local function profile_label(diagnostics)
   return name .. (source ~= "" and (" (" .. source .. ")") or "")
 end
 
-local function overview_rows(data)
+local function overview_rows(data, editable)
   local rows = {}
   local diagnostics = data.diagnostics
   if diagnostics.kind == "unavailable" then
@@ -211,7 +225,7 @@ local function overview_rows(data)
     return ""
   end)
 
-  rows[#rows + 1] = row(M.OVERVIEW_NOTE, true)
+  rows[#rows + 1] = row(editable and M.OVERVIEW_EDITABLE_NOTE or M.OVERVIEW_NOTE, true)
   return rows
 end
 
@@ -280,6 +294,72 @@ local function profile_rows(section)
   return rows
 end
 
+-- Quoted display form for one typed configuration value.
+local function value_label(value, kind)
+  if kind == "bool" or type(value) == "boolean" then
+    return value == true and "true" or "false"
+  end
+  if type(value) == "number" then
+    return text.number_text(value)
+  end
+  return '"' .. text.field(value, text.MAX_FIELD_BYTES) .. '"'
+end
+
+-- Editable configuration rows from `config.manage`: key, current value, and
+-- the logical source label (`default`, `user`, or `plugin:<id>`). A value is
+-- read on selection, so an unloaded row shows its key and source dimmed until
+-- `config.get` answers.
+local function managed_setting_rows(section)
+  local rows = {}
+  for index = 1, #section.rows do
+    local item = section.rows[index]
+    if not item.loaded then
+      rows[#rows + 1] = row(join({
+        item.key,
+        item.source,
+      }), true)
+    else
+      local value
+      if item.redacted then
+        value = "***REDACTED***"
+      elseif not item.found or item.value == nil then
+        value = "(unset)"
+      else
+        value = value_label(item.value, item.kind)
+      end
+      rows[#rows + 1] = row(join({
+        item.key .. " = " .. value,
+        item.source,
+      }))
+    end
+  end
+  return rows
+end
+
+local function managed_plugin_rows(section)
+  local rows = {}
+  for index = 1, #section.rows do
+    local item = section.rows[index]
+    rows[#rows + 1] = row(join({
+      item.id,
+      item.version ~= "" and ("v" .. item.version) or "",
+      item.source,
+      item.enabled and "enabled" or "disabled",
+      not item.managed and "unmanaged" or "",
+    }))
+  end
+  return rows
+end
+
+local function managed_profile_rows(section)
+  local rows = {}
+  for index = 1, #section.rows do
+    local item = section.rows[index]
+    rows[#rows + 1] = row(item.active and (item.name .. " (active)") or item.name)
+  end
+  return rows
+end
+
 local function diagnostics_rows(section)
   local rows = {}
   local value = section.value
@@ -320,15 +400,20 @@ function M.build(data, state, opts)
   local index = text.clamp_int(state and state.index, 1, 1, #M.SECTIONS)
   local section = M.SECTIONS[index]
   local page = M.page_size(opts.height)
+  local edit_state = opts.edit
   local view = {
     section = section,
     index = index,
     page = page,
     rows = {},
     note = nil,
+    notice = edit_state and edit_state.notice or nil,
     unavailable = nil,
     truncated = false,
     empty = false,
+    selected = nil,
+    action_hint = nil,
+    read_only = true,
   }
   if data == nil then
     view.unavailable = "no snapshot"
@@ -337,15 +422,42 @@ function M.build(data, state, opts)
     return view
   end
 
-  local source = data[section.id]
+  local managed = data.manage
+  view.read_only = managed == nil
+
   if section.id == "overview" then
-    view.rows = overview_rows(data)
+    view.rows = overview_rows(data, managed ~= nil)
     view.note = nil
-    view.offset = M.clamp_offset(state and state.offset, #view.rows, page)
+    local cursor = text.clamp_int(state and state.cursor, state and state.offset or 0, 0, M.max_cursor(#view.rows))
+    view.cursor = cursor
+    view.offset = M.clamp_offset(cursor, #view.rows, page)
+    view.selected = cursor + 1
     return view
   end
 
-  if source == nil or source.kind == "unavailable" then
+  -- An active input or confirm step replaces the section rows: the panel is
+  -- modal while a change is being composed or approved.
+  if edit_state ~= nil and edit_state.mode == edit.MODE_INPUT then
+    view.rows = { row(edit.input_row(edit_state)) }
+    view.rows[1].bold = true
+    view.note = "Enter preview · Esc cancel"
+    view.offset = 0
+    return view
+  end
+  if edit_state ~= nil and edit_state.mode == edit.MODE_CONFIRM then
+    local lines = edit.confirm_rows(edit_state)
+    for line_index = 1, #lines do
+      view.rows[line_index] = row(lines[line_index])
+    end
+    view.note = "Enter apply · Esc cancel"
+    view.offset = 0
+    return view
+  end
+
+  local source = data[section.id]
+  local managed_section = managed and managed[section.id] or nil
+
+  if managed_section == nil and (source == nil or source.kind == "unavailable") then
     view.unavailable = source and source.reason or "section unavailable"
     view.rows = { row("unavailable: " .. view.unavailable, true) }
     view.offset = 0
@@ -353,31 +465,57 @@ function M.build(data, state, opts)
   end
 
   if section.id == "plugins" then
-    view.rows = plugin_rows(source)
+    if managed_section ~= nil then
+      view.rows = managed_plugin_rows(managed_section)
+      view.action_hint = M.ACTION_HINT_PLUGINS
+    else
+      view.rows = plugin_rows(source)
+    end
   elseif section.id == "extensions" then
     view.rows = extension_rows(source)
   elseif section.id == "settings" then
-    view.rows = setting_rows(source)
-    view.note = M.READ_ONLY_NOTE
+    if managed_section ~= nil then
+      view.rows = managed_setting_rows(managed_section)
+      view.action_hint = M.ACTION_HINT_SETTINGS
+    else
+      view.rows = setting_rows(source)
+      view.note = M.READ_ONLY_NOTE
+    end
   elseif section.id == "profiles" then
-    view.rows = profile_rows(source)
+    if managed_section ~= nil then
+      view.rows = managed_profile_rows(managed_section)
+      view.action_hint = M.ACTION_HINT_PROFILES
+    else
+      view.rows = profile_rows(source)
+    end
   else
     view.rows = diagnostics_rows(source)
   end
 
-  view.truncated = source.truncated == true
+  view.truncated = (managed_section ~= nil and managed_section.truncated == true)
+    or (source ~= nil and source.truncated == true)
   if #view.rows == 0 then
     view.empty = true
-    view.rows = { row(EMPTY_TEXT[section.id] or "No rows.", true) }
+    local placeholder = EMPTY_TEXT[section.id] or "No rows."
+    if managed_section ~= nil and section.id == "settings" then
+      placeholder = "No editable settings reported by the host."
+    end
+    view.rows = { row(placeholder, true) }
   end
-  view.offset = M.clamp_offset(state and state.offset, #view.rows, page)
+  local cursor = text.clamp_int(state and state.cursor, state and state.offset or 0, 0, M.max_cursor(#view.rows))
+  view.cursor = cursor
+  view.offset = M.clamp_offset(cursor, #view.rows, page)
+  if not view.empty and view.unavailable == nil then
+    view.selected = cursor + 1
+  end
   return view
 end
 
 -- Apply one captured key event. Returns `state, action, changed`.
 --
--- Navigation is bounded: section moves wrap, row moves clamp, and the offset
--- never exceeds `row_count - page`.
+-- Navigation is bounded: section moves wrap, the row cursor clamps to the
+-- section, and the window offset follows the cursor without ever exceeding
+-- `row_count - page`.
 function M.apply_key(state, event, opts)
   opts = opts or {}
   local current = state or M.new_state()
@@ -385,6 +523,7 @@ function M.apply_key(state, event, opts)
   local page = text.clamp_int(opts.page, M.DEFAULT_PAGE, 1, M.MAX_PAGE)
   local index = text.clamp_int(current.index, 1, 1, #M.SECTIONS)
   local offset = M.clamp_offset(current.offset, row_count, page)
+  local cursor = text.clamp_int(current.cursor, offset, 0, M.max_cursor(row_count))
 
   local event_type = type(event) == "table" and event.type or nil
   if event_type == "wheel" then
@@ -409,14 +548,15 @@ function M.apply_key(state, event, opts)
   local shift = data ~= nil and data.shift == true
   local function moved(new_index)
     if new_index ~= index then
-      return { index = new_index, offset = 0 }, M.ACTION_NONE, true
+      return { index = new_index, offset = 0, cursor = 0 }, M.ACTION_NONE, true
     end
     return current, M.ACTION_NONE, false
   end
-  local function scrolled(new_offset)
-    local bounded = M.clamp_offset(new_offset, row_count, page)
-    if bounded ~= offset then
-      return { index = index, offset = bounded }, M.ACTION_NONE, true
+  local function moved_cursor(new_cursor)
+    local bounded = text.clamp_int(new_cursor, cursor, 0, M.max_cursor(row_count))
+    local new_offset = M.clamp_offset(bounded, row_count, page)
+    if bounded ~= cursor or new_offset ~= offset then
+      return { index = index, offset = new_offset, cursor = bounded }, M.ACTION_NONE, true
     end
     return current, M.ACTION_NONE, false
   end
@@ -440,22 +580,22 @@ function M.apply_key(state, event, opts)
     return moved((index - 2) % #M.SECTIONS + 1)
   end
   if literal == "j" or named == "arrowdown" then
-    return scrolled(offset + 1)
+    return moved_cursor(cursor + 1)
   end
   if literal == "k" or named == "arrowup" then
-    return scrolled(offset - 1)
+    return moved_cursor(cursor - 1)
   end
   if named == "pagedown" then
-    return scrolled(offset + page)
+    return moved_cursor(cursor + page)
   end
   if named == "pageup" then
-    return scrolled(offset - page)
+    return moved_cursor(cursor - page)
   end
   if named == "home" or literal == "g" then
-    return scrolled(0)
+    return moved_cursor(0)
   end
   if named == "end" or literal == "G" then
-    return scrolled(row_count)
+    return moved_cursor(row_count)
   end
   local digit = tonumber(literal)
   if digit ~= nil and digit >= 1 and digit <= #M.SECTIONS then
@@ -529,9 +669,15 @@ function M.apply_wheel(state, event, opts)
   local page = text.clamp_int(opts.page, M.DEFAULT_PAGE, 1, M.MAX_PAGE)
   local row_count = text.clamp_int(opts.row_count, 0, 0, 100000)
   local offset = M.clamp_offset(current.offset, row_count, page)
-  local bounded = M.clamp_offset(offset + M.wheel_delta(event, page), row_count, page)
-  if bounded ~= offset then
-    return { index = text.clamp_int(current.index, 1, 1, #M.SECTIONS), offset = bounded }, M.ACTION_NONE, true
+  local cursor = text.clamp_int(current.cursor, offset, 0, M.max_cursor(row_count))
+  local next_cursor = text.clamp_int(cursor + M.wheel_delta(event, page), cursor, 0, M.max_cursor(row_count))
+  local bounded = M.clamp_offset(next_cursor, row_count, page)
+  if next_cursor ~= cursor or bounded ~= offset then
+    return {
+      index = text.clamp_int(current.index, 1, 1, #M.SECTIONS),
+      offset = bounded,
+      cursor = next_cursor,
+    }, M.ACTION_NONE, true
   end
   return current, M.ACTION_NONE, false
 end

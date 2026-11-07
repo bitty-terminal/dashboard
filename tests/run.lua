@@ -17,9 +17,12 @@ local tap = require("support.tap")
 local SPECS = {
   "spec.text_spec",
   "spec.inspect_spec",
+  "spec.config_spec",
+  "spec.edit_spec",
   "spec.model_spec",
   "spec.render_spec",
   "spec.init_spec",
+  "spec.manage_spec",
 }
 
 -- Drop every cached dashboard module and the mock host global so each spec

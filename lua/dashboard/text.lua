@@ -280,6 +280,17 @@ function M.field(value, max_bytes)
   return ""
 end
 
+-- Number display without a forced decimal tail (`12.5`, not `12.50`).
+function M.number_text(value)
+  if type(value) ~= "number" or value ~= value or value == math.huge or value == -math.huge then
+    return ""
+  end
+  if value == math.floor(value) and math.abs(value) < 1e15 then
+    return string.format("%d", value)
+  end
+  return string.format("%.6g", value)
+end
+
 -- Clamp an integer-ish value into `[minimum, maximum]`, falling back to
 -- `default` for nil or non-finite input.
 function M.clamp_int(value, default, minimum, maximum)
