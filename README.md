@@ -98,7 +98,7 @@ return {
 ```
 
 A single-character key needs a modifier; named keys may stand alone. Use
-`bitty key <chord>` to check a binding before relying on it.
+`bitty inspect key <chord>` (or `bitty +list-keybinds`) to check a binding before relying on it.
 
 While the panel is open it owns a transient input capture, so its own keys are:
 
