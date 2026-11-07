@@ -58,11 +58,15 @@ docs: deps
 lua: deps
     @test -x node_modules/.bin/luaparse || { echo "luaparse is not installed; run 'just install'" >&2; exit 1; }
     bun run luaparse --quiet --file lua/dashboard/init.lua
+    bun run luaparse --quiet --file lua/dashboard/config.lua
+    bun run luaparse --quiet --file lua/dashboard/edit.lua
     bun run luaparse --quiet --file lua/dashboard/inspect.lua
     bun run luaparse --quiet --file lua/dashboard/model.lua
     bun run luaparse --quiet --file lua/dashboard/render.lua
     bun run luaparse --quiet --file lua/dashboard/text.lua
     {{ luac }} -p lua/dashboard/init.lua
+    {{ luac }} -p lua/dashboard/config.lua
+    {{ luac }} -p lua/dashboard/edit.lua
     {{ luac }} -p lua/dashboard/inspect.lua
     {{ luac }} -p lua/dashboard/model.lua
     {{ luac }} -p lua/dashboard/render.lua

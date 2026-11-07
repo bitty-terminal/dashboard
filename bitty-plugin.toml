@@ -11,40 +11,50 @@
 [plugin]
 id = "bitty-terminal.dashboard"
 name = "Dashboard"
-version = "0.0.1"
-description = "Read-only configuration and status dashboard: runtime, plugins, extensions, settings, profiles, and diagnostics in one panel."
+version = "0.2.0"
+description = "Configuration and status dashboard: inspect runtime state and edit settings, plugins, and profiles in one panel."
 license = "MIT"
 
 [compat]
 # `bitty.runtime.inspect()` is the read-only snapshot this panel is built on
-# (bitty#2396, merged in bitty#2410); the first release train that ships it is
-# 0.0.26, so that is the floor. Compatibility is minimum-only: there is no
-# declared ceiling, so a newer host is admitted instead of being rejected
-# before it can run the plugin. The host resolves both requirements before
-# activation and fails closed on a mismatch.
-bitty = ">=0.0.26"
+# (bitty#2396, merged in bitty#2410); the typed `config.manage` surface is the
+# write path (bitty#2393, the full read/write verb set lands in 0.0.31). The
+# floor names the first release that parses every declared capability and
+# exposes every verb this plugin calls. Compatibility is minimum-only: there
+# is no declared ceiling, so a newer host is admitted instead of being
+# rejected before it can run the plugin. The host resolves both requirements
+# before activation and fails closed on a mismatch.
+bitty = ">=0.0.31"
 plugin-api = "^1.0"
 
 [capabilities]
-# Deny by default; two grants, each exercised by code.
+# Deny by default; three grants, each exercised by code.
 #
-# - `runtime.inspect`: the only data source. `bitty.runtime.inspect()` is
-#   argument-free, read-only, bounded to 64 KiB, and returns typed
-#   `unavailable: <reason>` markers per section instead of failing the call.
-#   Nothing in this plugin reads configuration files, the ledger, or the
-#   extension roots directly.
+# - `runtime.inspect`: the read-only data source for sections that are not
+#   managed. `bitty.runtime.inspect()` is argument-free, read-only, bounded to
+#   64 KiB, and returns typed `unavailable: <reason>` markers per section
+#   instead of failing the call. Nothing in this plugin reads configuration
+#   files, the ledger, or the extension roots directly.
 # - `ui.overlay.focus`: the accepted W-01 focusable-overlay plus transient
 #   input-capture grant. The dashboard presents a multi-row panel, and the
 #   host paints an `overlay`-slot block only for the plugin that owns the
 #   capture session; the spec-path `bitty.ui.overlay.acquire(spec)` mounts the
 #   surface directly, so the v1 presentation grants (`ui.rich`, `ui.overlay`)
 #   are not requested or needed.
+# - `config.manage`: the high-risk, consent-bound write grant (bitty#2393).
+#   One recorded grant covers the bounded read query (`config.get`,
+#   `config.sources`, `plugins.list`, `profiles.list`) and three token-bound
+#   writes (`config.preview`/`set`, `config.preview_enabled`/`set_enabled`,
+#   `profiles.preview_use`/`use`). The host enforces a one-shot approval digest
+#   bound to the exact rendered bytes; the plugin's two-press preview/confirm
+#   flow is a UI contract, not a substitute for that token. A host that denies
+#   the grant keeps the read-only rendering and no write is attempted.
 #
-# No `config.manage`, `runtime.configure`, `terminal.input.*`, filesystem,
-# process, network, clipboard, or debug authority. Settings writes are
-# deferred to the typed `config.manage` API (bitty#2393).
+# No `runtime.configure`, `terminal.input.*`, filesystem, process, network,
+# clipboard, or debug authority.
 runtime.inspect = true
 ui.overlay.focus = true
+config.manage = true
 
 [lazy]
 # Static trigger: the host registers the command without creating a VM.

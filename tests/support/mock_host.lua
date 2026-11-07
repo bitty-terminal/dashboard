@@ -2,9 +2,10 @@
 --
 -- Models only the accepted surface the plugin uses: the lazy command and event
 -- registration gates, `bitty.runtime.inspect()`, the W-01 focusable-overlay
--- session (`bitty.ui.overlay.*`), and generation-owned one-shot timers. Every
--- capability is deny-by-default and every payload is recorded so specs can
--- assert the exact host call shape.
+-- session (`bitty.ui.overlay.*`), generation-owned one-shot timers, and — when
+-- `options.config` is set — the typed `config.manage` read/write surface
+-- (bitty#2393). Every capability is deny-by-default and every payload is
+-- recorded so specs can assert the exact host call shape.
 --
 -- It performs no I/O, spawns nothing, and never touches the network or the
 -- filesystem. Events, snapshots, and captured input are staged explicitly.
@@ -16,6 +17,73 @@ local PLUGIN_ID = "bitty-terminal.dashboard"
 
 local function fail(class, code, message)
   error({ class = class, code = code, message = message }, 0)
+end
+
+-- Staged effective configuration for the editable subset.
+local DEFAULT_SETTINGS = {
+  ["appearance.theme"] = { value = "default", kind = "text", source = "default" },
+  ["appearance.animations.enabled"] = { value = true, kind = "bool", source = "default" },
+  ["font.family"] = { value = "JetBrains Mono", kind = "text", source = "user" },
+  ["font.size"] = { value = 12.5, kind = "number", source = "user" },
+  ["window.opacity"] = { value = 0.95, kind = "number", source = "default" },
+  ["window.padding"] = { value = 8, kind = "integer", source = "default" },
+  ["terminal.scrollback"] = { value = 10000, kind = "integer", source = "default" },
+  ["terminal.cursor_style"] = { value = "steady_bar", kind = "text", source = "default" },
+  ["terminal.bell"] = { value = "visual", kind = "text", source = "default" },
+  ["selection.auto_copy"] = { value = false, kind = "bool", source = "default" },
+  ["close_confirm"] = { value = "when_busy", kind = "text", source = "default" },
+  ["scrollbar.mode"] = { value = "auto", kind = "text", source = "default" },
+}
+
+local DEFAULT_PLUGINS = {
+  { id = "bitty-terminal.bar", enabled = true, managed = true, source = "bundled", version = "0.0.1" },
+  { id = "bitty-terminal.dashboard", enabled = true, managed = true, source = "registry", version = "0.2.0" },
+  { id = "bitty-terminal.palette", enabled = false, managed = false, source = "git", version = "0.1.0" },
+}
+
+local DEFAULT_PROFILES = {
+  { name = "default", active = false },
+  { name = "work", active = true },
+}
+
+local function copy_settings(source)
+  local out = {}
+  for key, entry in pairs(source or {}) do
+    out[key] = { value = entry.value, kind = entry.kind, source = entry.source }
+  end
+  return out
+end
+
+local function copy_rows(rows)
+  local out = {}
+  for index = 1, #(rows or {}) do
+    local row = {}
+    for key, value in pairs(rows[index]) do
+      row[key] = value
+    end
+    out[#out + 1] = row
+  end
+  return out
+end
+
+local function literal(value, kind)
+  if kind == "text" then
+    return '"' .. tostring(value) .. '"'
+  end
+  if kind == "bool" then
+    return value == true and "true" or "false"
+  end
+  return tostring(value)
+end
+
+local function check_value(kind, value)
+  if kind == "text" then
+    return type(value) == "string"
+  end
+  if kind == "bool" then
+    return type(value) == "boolean"
+  end
+  return type(value) == "number"
 end
 
 local function is_component(value)
@@ -45,7 +113,14 @@ function MockHost.new(options)
   local self = setmetatable({}, MockHost)
   self.plugin_id = options.plugin_id or PLUGIN_ID
   self.grants = {}
-  for _, name in ipairs(options.grants or { "runtime.inspect", "ui.overlay.focus" }) do
+  local grants = options.grants
+  if grants == nil then
+    grants = { "runtime.inspect", "ui.overlay.focus" }
+    if options.config then
+      grants[#grants + 1] = "config.manage"
+    end
+  end
+  for _, name in ipairs(grants) do
     self.grants[name] = true
   end
   self.declared_commands = {}
@@ -72,6 +147,27 @@ function MockHost.new(options)
   self.timers = {}
   self.next_timer = 0
   self.clock = 0
+
+  -- `config.manage` state. The surface is absent unless the spec opts in, so
+  -- the default mock models a host that predates the API.
+  self.config_enabled = options.config == true
+  self.config_values = copy_settings(DEFAULT_SETTINGS)
+  for key, entry in pairs(options.config_values or {}) do
+    self.config_values[key] = {
+      value = entry.value,
+      kind = entry.kind or (DEFAULT_SETTINGS[key] and DEFAULT_SETTINGS[key].kind) or "text",
+      source = entry.source or "default",
+    }
+  end
+  self.plugin_rows = copy_rows(options.plugin_rows or DEFAULT_PLUGINS)
+  self.profile_rows = copy_rows(options.profile_rows or DEFAULT_PROFILES)
+  self.config_calls = {}
+  self.approvals = {}
+  self.issued_log = {}
+  self.next_digest = 0
+  self.stale_once = options.stale_once == true
+  self.config_error = options.config_error
+  self.pending_restart = options.pending_restart == true
   self.bitty = self:build()
   return self
 end
@@ -92,6 +188,282 @@ function MockHost:require(capability)
   if not self:has(capability) then
     fail("runtime", "E_CAPABILITY_DENIED", "requires capability " .. capability)
   end
+end
+
+-- Raise the staged backend failure, if any. The call is recorded first so a
+-- spec can still assert what the plugin attempted.
+function MockHost:config_fail()
+  if self.config_error ~= nil then
+    error(self.config_error, 0)
+  end
+end
+
+-- Record one `config.manage` call and its arguments.
+function MockHost:record(method, ...)
+  self.config_calls[#self.config_calls + 1] = { method = method, args = { ... } }
+end
+
+-- Every recorded call name, in order.
+function MockHost:call_names()
+  local names = {}
+  for index = 1, #self.config_calls do
+    names[#names + 1] = self.config_calls[index].method
+  end
+  return names
+end
+
+function MockHost:count_calls(method)
+  local count = 0
+  for index = 1, #self.config_calls do
+    if self.config_calls[index].method == method then
+      count = count + 1
+    end
+  end
+  return count
+end
+
+function MockHost:last_call(method)
+  for index = #self.config_calls, 1, -1 do
+    if self.config_calls[index].method == method then
+      return self.config_calls[index]
+    end
+  end
+  return nil
+end
+
+-- Issue one one-shot approval digest for an exact intent.
+function MockHost:issue(target)
+  self.next_digest = self.next_digest + 1
+  local digest = string.format("%064x", self.next_digest)
+  self.approvals[digest] = target
+  self.issued_log[#self.issued_log + 1] = { digest = digest, target = target }
+  return digest
+end
+
+function MockHost:last_issued()
+  return self.issued_log[#self.issued_log]
+end
+
+-- Consume the approval for exactly this intent. A missing or mismatched
+-- token fails closed like the host does.
+function MockHost:consume(digest, target)
+  local stored = self.approvals[digest]
+  if stored == nil then
+    fail("runtime", "E_CONFIG_APPROVAL_REQUIRED", "no fresh preview token for this change")
+  end
+  if stored.kind ~= target.kind or stored.key ~= target.key or stored.value ~= target.value then
+    fail("runtime", "E_CONFIG_APPROVAL_MISMATCH", "approval does not match this exact change")
+  end
+  self.approvals[digest] = nil
+end
+
+function MockHost:find_plugin(id)
+  for index = 1, #self.plugin_rows do
+    if self.plugin_rows[index].id == id then
+      return self.plugin_rows[index]
+    end
+  end
+  return nil
+end
+
+function MockHost:active_profile()
+  for index = 1, #self.profile_rows do
+    if self.profile_rows[index].active then
+      return self.profile_rows[index].name
+    end
+  end
+  return nil
+end
+
+function MockHost:build_config()
+  local self = self
+  local config = {}
+
+  config.get = function(key)
+    self:require("config.manage")
+    self:record("config.get", key)
+    self:config_fail()
+    local entry = self.config_values[key]
+    if entry == nil then
+      fail("validation", "E_CONFIG_KEY", "config path is not in the config.manage allowlist")
+    end
+    return {
+      key = key,
+      found = true,
+      value = entry.value,
+      kind = entry.kind,
+      source = entry.source,
+      redacted = false,
+    }
+  end
+
+  config.sources = function()
+    self:require("config.manage")
+    self:record("config.sources")
+    self:config_fail()
+    local keys = {}
+    for key in pairs(self.config_values) do
+      keys[#keys + 1] = key
+    end
+    table.sort(keys)
+    local rows = {}
+    for index = 1, #keys do
+      rows[index] = { key = keys[index], source = self.config_values[keys[index]].source }
+    end
+    return { rows = rows, count = #rows, truncated = false }
+  end
+
+  config.preview = function(key, value)
+    self:require("config.manage")
+    self:record("config.preview", key, value)
+    self:config_fail()
+    local entry = self.config_values[key]
+    if entry == nil then
+      fail("validation", "E_CONFIG_KEY", "config path is not in the config.manage allowlist")
+    end
+    if not check_value(entry.kind, value) then
+      fail("validation", "E_CONFIG_VALUE", "config value has the wrong type for this setting")
+    end
+    local digest = self:issue({ kind = "setting", key = key, value = value })
+    return {
+      digest = digest,
+      rendered = "-" .. key .. " = " .. literal(entry.value, entry.kind)
+        .. "\n+" .. key .. " = " .. literal(value, entry.kind),
+      keys = { key },
+    }
+  end
+
+  config.set = function(key, value, digest)
+    self:require("config.manage")
+    self:record("config.set", key, value, digest)
+    self:config_fail()
+    local entry = self.config_values[key]
+    if entry == nil then
+      fail("validation", "E_CONFIG_KEY", "config path is not in the config.manage allowlist")
+    end
+    self:consume(digest, { kind = "setting", key = key, value = value })
+    if self.stale_once then
+      self.stale_once = false
+      fail("runtime", "E_CONFIG_STALE", "the configuration candidate changed since it was previewed")
+    end
+    entry.value = value
+    entry.source = "user"
+    return { applied = true, reload = "auto" }
+  end
+
+  config.preview_enabled = function(id, enabled)
+    self:require("config.manage")
+    self:record("config.preview_enabled", id, enabled)
+    self:config_fail()
+    local row = self:find_plugin(id)
+    if row == nil then
+      fail("validation", "E_CONFIG_INVALID", "plugin id is not in the managed ledger")
+    end
+    local digest = self:issue({ kind = "plugin", key = id, value = enabled })
+    return {
+      digest = digest,
+      rendered = "-" .. id .. " = " .. literal(row.enabled, "bool")
+        .. "\n+" .. id .. " = " .. literal(enabled, "bool"),
+      keys = { id },
+      changed = row.enabled ~= enabled,
+    }
+  end
+
+  config.set_enabled = function(id, enabled, digest)
+    self:require("config.manage")
+    self:record("config.set_enabled", id, enabled, digest)
+    self:config_fail()
+    local row = self:find_plugin(id)
+    if row == nil then
+      fail("validation", "E_CONFIG_INVALID", "plugin id is not in the managed ledger")
+    end
+    self:consume(digest, { kind = "plugin", key = id, value = enabled })
+    row.enabled = enabled
+    return { changed = true, reload = "auto" }
+  end
+
+  return config
+end
+
+function MockHost:build_plugins()
+  local self = self
+  return {
+    list = function()
+      self:require("config.manage")
+      self:record("plugins.list")
+      self:config_fail()
+      local rows = {}
+      for index = 1, #self.plugin_rows do
+        local row = self.plugin_rows[index]
+        rows[index] = {
+          id = row.id,
+          enabled = row.enabled,
+          managed = row.managed,
+          source = row.source,
+          version = row.version,
+        }
+      end
+      return { rows = rows, count = #rows, truncated = false }
+    end,
+  }
+end
+
+function MockHost:build_profiles()
+  local self = self
+  local profiles = {}
+
+  profiles.list = function()
+    self:require("config.manage")
+    self:record("profiles.list")
+    self:config_fail()
+    local rows = {}
+    for index = 1, #self.profile_rows do
+      rows[index] = { name = self.profile_rows[index].name, active = self.profile_rows[index].active }
+    end
+    return { rows = rows, active = self:active_profile(), count = #rows, truncated = false }
+  end
+
+  profiles.preview_use = function(name)
+    self:require("config.manage")
+    self:record("profiles.preview_use", name)
+    self:config_fail()
+    local found = false
+    for index = 1, #self.profile_rows do
+      if self.profile_rows[index].name == name then
+        found = true
+      end
+    end
+    if not found then
+      fail("validation", "E_CONFIG_INVALID", "profile name is invalid")
+    end
+    local active = self:active_profile()
+    local digest = self:issue({ kind = "profile", key = name, value = name })
+    return {
+      digest = digest,
+      rendered = "-profile = " .. literal(active or "", "text")
+        .. "\n+profile = " .. literal(name, "text"),
+      keys = { "profile" },
+      changed = active ~= name,
+    }
+  end
+
+  profiles.use = function(name, digest)
+    self:require("config.manage")
+    self:record("profiles.use", name, digest)
+    self:config_fail()
+    self:consume(digest, { kind = "profile", key = name, value = name })
+    for index = 1, #self.profile_rows do
+      self.profile_rows[index].active = self.profile_rows[index].name == name
+    end
+    return {
+      active = name,
+      changed = true,
+      reload = "auto",
+      pending_restart = self.pending_restart,
+    }
+  end
+
+  return profiles
 end
 
 function MockHost:build()
@@ -248,6 +620,12 @@ function MockHost:build()
     return true
   end
   bitty.ui = { overlay = overlay }
+
+  if self.config_enabled then
+    bitty.config = self:build_config()
+    bitty.plugins = self:build_plugins()
+    bitty.profiles = self:build_profiles()
+  end
 
   return bitty
 end

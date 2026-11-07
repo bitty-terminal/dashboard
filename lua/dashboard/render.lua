@@ -24,6 +24,7 @@ M.ACTIVE_FG = "accent"
 -- `selection`, `accent`); `foreground` is the dimmest available choice.
 M.DIM_FG = "foreground"
 M.RULE_GLYPH = "-"
+M.SELECTED = "› "
 
 local function node(kind, content)
   return { kind = kind, text = content }
@@ -84,6 +85,17 @@ function M.footer(view)
   if view.truncated then
     rows_word = rows_word .. " (host-truncated)"
   end
+  local hint = view.action_hint
+  if hint ~= nil and hint ~= "" then
+    return string.format(
+      "%d/%d %s · %s · j/k h/l · r refresh · %s · q close",
+      view.index,
+      #model.SECTIONS,
+      view.section.title,
+      rows_word,
+      hint
+    )
+  end
   return string.format(
     "%d/%d %s · %s · j/k row · h/l section · r refresh · q close",
     view.index,
@@ -115,13 +127,14 @@ function M.scene(view, opts)
     row_count = #view.rows,
     empty = view.empty,
     truncated = view.truncated,
+    action_hint = view.action_hint,
   }
 
   -- Direct children of the root are the painted rows. A nested `List` here
   -- would collapse every content row into one line, because Core flattens a
   -- non-root group horizontally instead of stacking it.
   local children = {
-    node("Text", truncate(M.TITLE .. " · read-only", width)),
+    node("Text", truncate(M.TITLE .. (view.read_only and " · read-only" or ""), width)),
   }
   children[1].bold = true
 
@@ -132,9 +145,15 @@ function M.scene(view, opts)
   local content_rows = 0
   for index = first, last do
     local item = view.rows[index]
-    local content = truncate(item.text, width)
-    local child = node("Text", content)
-    if item.dim then
+    local content = item.text
+    if view.selected == index then
+      content = M.SELECTED .. content
+    end
+    local child = node("Text", truncate(content, width))
+    if view.selected == index then
+      child.bold = true
+      child.fg = M.ACTIVE_FG
+    elseif item.dim then
       child.fg = M.DIM_FG
     end
     children[#children + 1] = child
@@ -142,6 +161,12 @@ function M.scene(view, opts)
   end
   if content_rows == 0 then
     children[#children + 1] = node("Text", truncate("No rows.", width))
+  end
+
+  if view.notice ~= nil and view.notice ~= "" then
+    local notice = node("Text", truncate(view.notice, width))
+    notice.fg = M.DIM_FG
+    children[#children + 1] = notice
   end
 
   if view.note ~= nil and view.note ~= "" then

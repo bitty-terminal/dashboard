@@ -6,14 +6,13 @@
 -- while this file executes.
 --
 -- Surface: the read-only `bitty.runtime.inspect()` snapshot (bitty#2396,
--- merged in bitty#2410) plus the accepted W-01 focusable-overlay and
--- transient-input-capture contract (`ui.overlay.focus`,
--- `bitty.ui.overlay.*`). The overlay is the only host surface that presents a
+-- merged in bitty#2410), the accepted W-01 focusable-overlay and
+-- transient-input-capture contract (`ui.overlay.focus`, `bitty.ui.overlay.*`),
+-- and the typed `config.manage` surface (CTX-1613/CTX-1647, bitty#2393) when
+-- the host grants it. The overlay is the only host surface that presents a
 -- multi-row block to a plugin, and the host paints an `overlay`-slot block
 -- only for the capture owner, so the dashboard acquires a session in one
--- Core-owned switch and releases it on close. No other authority is requested:
--- no `config.manage`, no filesystem, process, network, clipboard, or terminal
--- input.
+-- Core-owned switch and releases it on close.
 --
 -- Navigation is captured input, bounded to the documented keys, plus a
 -- bounded wheel step. `drain` is the only place that polls; the host nudges
@@ -23,10 +22,14 @@
 -- budget is finite: an abandoned panel releases its capture at
 -- `MAX_SESSION_MS` instead of refreshing the deadline forever.
 --
--- Settings are read-only. Writing them is deferred until the typed
--- `config.manage` API lands (bitty#2393); the UI and README say so explicitly
--- and no code path here writes configuration.
+-- Edits follow a two-press contract: the first Enter previews one exact
+-- change and shows the host's rendered diff plus its changed keys; the second
+-- Enter applies it with the one-shot preview digest. Esc cancels. Without the
+-- `config.manage` grant (or on a host that predates it) every tab keeps the
+-- read-only `runtime.inspect()` rendering and no write is attempted.
 
+local config = require("dashboard.config")
+local edit = require("dashboard.edit")
 local inspect = require("dashboard.inspect")
 local model = require("dashboard.model")
 local render = require("dashboard.render")
@@ -69,6 +72,9 @@ local state = {
   height = M.DEFAULT_HEIGHT,
   timer = nil,
   rearms = 0,
+  edit = edit.new(),
+  manage = nil,
+  config_blocked = false,
 }
 
 local function overlay_table()
@@ -95,24 +101,130 @@ local function unavailable_all(reason)
   }
 end
 
--- Re-read the snapshot. A denied or missing `runtime.inspect` grant is a
--- first-class state: every section renders `unavailable: <reason>` instead of
--- an empty list.
+-- Clamp the selected row against the row set that is actually on screen.
+local function clamp_selection()
+  local view = model.build(state.data, state.nav, { height = state.height })
+  state.nav.cursor = text.clamp_int(state.nav.cursor, state.nav.offset, 0, model.max_cursor(#view.rows))
+  state.nav.offset = model.clamp_offset(state.nav.cursor, #view.rows, view.page)
+end
+
+-- Drop the managed data after a refusal that makes the write surface unusable
+-- (missing grant, unwired backend, unsafe user layer).
+local function block_manage()
+  state.config_blocked = true
+  state.manage = nil
+  if state.data ~= nil then
+    state.data.manage = nil
+  end
+end
+
+-- Forward declaration: `collect` reloads the selected row's value after the
+-- section rows are rebuilt.
+local load_selected_value
+
+-- Which managed list the active tab needs. Settings are always read; the
+-- plugin and profile lists are fetched only for the tab that shows them.
+local function active_lists()
+  local active = model.section(state.nav.index).id
+  return { plugins = active == "plugins", profiles = active == "profiles" }
+end
+
+-- Re-read the snapshot and, when the grant allows it, the managed sections.
+-- A denied or missing `runtime.inspect` grant is a first-class state: every
+-- section renders `unavailable: <reason>` instead of an empty list. A blocked
+-- `config.manage` surface leaves `data.manage` nil, which keeps the read-only
+-- rendering on every tab.
 local function collect()
   local data, err = inspect.collect(bitty)
   if data ~= nil then
     state.data = data
     state.error = nil
-    return true
+  else
+    state.data = unavailable_all(err.message)
+    state.error = err
+    state.manage = nil
+    clamp_selection()
+    return false
   end
-  state.data = unavailable_all(err.message)
-  state.error = err
-  return false
+  if not state.config_blocked then
+    local managed, manage_err = config.collect(bitty, state.manage, active_lists())
+    if managed ~= nil then
+      state.data.manage = managed
+      state.manage = managed
+    elseif config.is_blocked(manage_err) then
+      block_manage()
+    elseif state.manage ~= nil then
+      -- A rate or read refusal keeps the last good managed snapshot instead
+      -- of dropping a granted panel back to read-only.
+      state.data.manage = state.manage
+    else
+      state.data.manage = nil
+    end
+  end
+  clamp_selection()
+  load_selected_value()
+  return true
+end
+
+-- Fetch one managed list the first time its tab becomes active. One call,
+-- so a tab switch cannot spend the generation's `config.manage` budget.
+local function collect_list(section_id)
+  local managed = state.data and state.data.manage
+  if managed == nil or state.config_blocked then
+    return
+  end
+  if section_id == "plugins" and managed.plugins == nil then
+    local plugins, err = config.plugins(bitty)
+    if plugins ~= nil then
+      managed.plugins = plugins
+    elseif config.is_blocked(err) then
+      block_manage()
+    end
+  elseif section_id == "profiles" and managed.profiles == nil then
+    local profiles, err = config.profiles(bitty)
+    if profiles ~= nil then
+      managed.profiles = profiles
+    elseif config.is_blocked(err) then
+      block_manage()
+    end
+  end
+end
+
+-- Read one row's value with `config.get`. `sources()` never carries a value,
+-- so this is the only read that touches a setting.
+local function load_row_value(row)
+  if row == nil or row.loaded then
+    return
+  end
+  local value, err = config.get(bitty, row.key)
+  if value == nil then
+    if config.is_blocked(err) then
+      block_manage()
+    end
+    return
+  end
+  row.value = value.value
+  row.found = value.found
+  row.kind = value.kind
+  row.redacted = value.redacted
+  row.source = value.source ~= "" and value.source or row.source
+  row.loaded = true
+end
+
+-- Read the selected Settings row when its value is not cached yet.
+load_selected_value = function()
+  if model.section(state.nav.index).id ~= "settings" then
+    return
+  end
+  local managed = state.data and state.data.manage
+  if managed == nil or managed.settings == nil then
+    return
+  end
+  load_row_value(managed.settings.rows[state.nav.cursor + 1])
 end
 
 local function layout()
-  local view = model.build(state.data, state.nav, { height = state.height })
-  view.offset = state.nav.offset
+  local view = model.build(state.data, state.nav, { height = state.height, edit = state.edit })
   local component = render.scene(view, { width = state.width, height = state.height })
   return component, view
 end
@@ -172,6 +284,8 @@ local function reset()
   state.data = nil
   state.error = nil
   state.rearms = 0
+  state.edit = edit.new()
+  state.manage = nil
 end
 
 -- Paint the current view on the held session. A rejected update keeps the
@@ -250,6 +364,456 @@ function M.close(reason)
   return true
 end
 
+-- Captured key helpers. Core labels most named keys `key:<Name>` and a
+-- character as bare text when the layout supplies it. Enter, Tab, Backspace,
+-- and Escape arrive as their control literal when the platform provides one
+-- (`\r`, `\t`, `\b`, `\x1b`), so both spellings normalize to one name.
+local NAMED_LITERALS = {
+  ["\r"] = "enter",
+  ["\n"] = "enter",
+  ["\t"] = "tab",
+  ["\b"] = "backspace",
+  ["\27"] = "escape",
+}
+
+local function key_named(event)
+  if type(event) ~= "table" or event.type ~= "key" or type(event.text) ~= "string" then
+    return nil, nil
+  end
+  local raw = event.text
+  if NAMED_LITERALS[raw] ~= nil then
+    return NAMED_LITERALS[raw], nil
+  end
+  if string.sub(raw, 1, 4) == "key:" then
+    return string.lower(string.sub(raw, 5)), nil
+  end
+  return nil, raw
+end
+
+-- Normalize a control-literal key into the `key:<Name>` spelling the pure
+-- navigation model understands.
+local function model_event(event)
+  if type(event) == "table" and event.type == "key" and NAMED_LITERALS[event.text] ~= nil then
+    return { type = "key", text = "key:" .. NAMED_LITERALS[event.text], data = event.data }
+  end
+  return event
+end
+
+-- One printable character from a captured key event, or nil.
+local function key_char(event)
+  if type(event) ~= "table" or event.type ~= "key" or type(event.text) ~= "string" then
+    return nil
+  end
+  local raw = event.text
+  if string.sub(raw, 1, 4) == "key:" then
+    local named = string.sub(raw, 5)
+    if named == " " then
+      return " "
+    end
+    if #named == 1 and string.match(named, "%c") == nil then
+      return named
+    end
+    return nil
+  end
+  if raw ~= "" and string.match(raw, "%c") == nil then
+    return raw
+  end
+  return nil
+end
+
+-- The managed row under the selection, or nil when that tab is read-only.
+local function selected_managed_row(section_id)
+  local managed = state.data and state.data.manage
+  local section = managed and managed[section_id] or nil
+  if section == nil then
+    return nil
+  end
+  return section.rows[state.nav.cursor + 1]
+end
+
+-- Turn one refused call into a bounded notice. A denial is terminal for the
+-- generation: the panel drops back to the read-only rendering and never
+-- retries the write.
+local function write_failure(err)
+  if err == nil then
+    state.edit = edit.notice(state.edit, "config.manage call failed")
+    return
+  end
+  if config.is_blocked(err) then
+    block_manage()
+    collect()
+    state.edit = edit.notice(edit.new(), config.blocked_notice(err))
+    return
+  end
+  state.edit = edit.notice(state.edit, err.code .. ": " .. err.message)
+end
+
+local function preview_config(key, value, notice)
+  local preview, err = config.preview(bitty, key, value)
+  if preview == nil then
+    write_failure(err)
+    return false
+  end
+  state.edit = edit.start_confirm(state.edit, {
+    target = edit.TARGET_CONFIG,
+    subject = key,
+    kind = config.kind_of(key) or config.KIND_TEXT,
+    value = value,
+    preview = preview,
+    notice = notice,
+  })
+  return true
+end
+
+-- Enter on one editable setting: bools toggle, enums cycle, and everything
+-- else opens the one-line input.
+local function begin_setting_edit(item)
+  if item == nil then
+    return
+  end
+  if not item.loaded then
+    load_row_value(item)
+  end
+  if not item.loaded then
+    state.edit = edit.notice(state.edit, "value unavailable; press r to retry")
+    return
+  end
+  local kind = config.kind_of(item.key) or item.kind or config.KIND_TEXT
+  local values = config.ENUMS[item.key]
+  if kind == config.KIND_BOOL then
+    preview_config(item.key, not (item.value == true))
+  elseif values ~= nil then
+    local current = item.found and item.value or nil
+    preview_config(item.key, edit.next_enum(current, values))
+  else
+    state.edit = edit.start_input(state.edit, {
+      target = edit.TARGET_CONFIG,
+      subject = item.key,
+      kind = kind,
+      seed = item.found and edit.seed_value(item.value, kind) or "",
+      prompt = item.key .. " = ",
+    })
+  end
+end
+
+local function begin_plugin_toggle(item)
+  if item == nil then
+    return
+  end
+  local enabled = not item.enabled
+  local preview, err = config.preview_enabled(bitty, item.id, enabled)
+  if preview == nil then
+    write_failure(err)
+    return
+  end
+  if preview.changed == false then
+    state.edit = edit.notice(
+      state.edit,
+      item.id .. " is already " .. (item.enabled and "enabled" or "disabled")
+    )
+    return
+  end
+  state.edit = edit.start_confirm(state.edit, {
+    target = edit.TARGET_PLUGIN,
+    subject = item.id,
+    kind = config.KIND_BOOL,
+    value = enabled,
+    preview = preview,
+  })
+end
+
+local function begin_profile_use(item)
+  if item == nil then
+    return
+  end
+  if item.active then
+    state.edit = edit.notice(state.edit, item.name .. " is already active")
+    return
+  end
+  local preview, err = config.preview_use(bitty, item.name)
+  if preview == nil then
+    write_failure(err)
+    return
+  end
+  state.edit = edit.start_confirm(state.edit, {
+    target = edit.TARGET_PROFILE,
+    subject = item.name,
+    kind = config.KIND_TEXT,
+    value = nil,
+    preview = preview,
+  })
+end
+
+-- Re-run the preview for one pending intent. Used after a stale digest or an
+-- expired approval: the user reviews the fresh rendering before the second
+-- Enter.
+local function repreview(pending, notice)
+  local preview, err
+  if pending.target == edit.TARGET_CONFIG then
+    preview, err = config.preview(bitty, pending.subject, pending.value)
+  elseif pending.target == edit.TARGET_PLUGIN then
+    preview, err = config.preview_enabled(bitty, pending.subject, pending.value)
+  else
+    preview, err = config.preview_use(bitty, pending.subject)
+  end
+  if preview == nil then
+    write_failure(err)
+    return
+  end
+  state.edit = edit.start_confirm(edit.new(), {
+    target = pending.target,
+    subject = pending.subject,
+    kind = pending.kind,
+    value = pending.value,
+    preview = preview,
+    notice = notice,
+  })
+end
+
+local function reload_note(reload)
+  return reload ~= nil and reload ~= "" and reload or "auto"
+end
+
+-- Refresh the runtime snapshot without spending a `config.manage` call. The
+-- managed rows are reattached so the panel keeps its editable data.
+local function refresh_snapshot()
+  local data = inspect.collect(bitty)
+  if data == nil then
+    return
+  end
+  state.data = data
+  state.data.manage = state.manage
+  clamp_selection()
+end
+
+-- Apply one accepted setting write to the cached row. The write result is
+-- authoritative for the changed key, so no extra read is spent on it.
+local function update_setting_row(key, value, applied)
+  local managed = state.manage
+  if managed == nil or managed.settings == nil or not applied then
+    return
+  end
+  for index = 1, #managed.settings.rows do
+    local row = managed.settings.rows[index]
+    if row.key == key then
+      row.value = value
+      row.found = true
+      row.kind = config.kind_of(key) or row.kind
+      row.source = "user"
+      row.redacted = false
+      row.loaded = true
+      return
+    end
+  end
+end
+
+local function update_plugin_row(id, enabled)
+  local managed = state.manage
+  if managed == nil or managed.plugins == nil then
+    return
+  end
+  for index = 1, #managed.plugins.rows do
+    if managed.plugins.rows[index].id == id then
+      managed.plugins.rows[index].enabled = enabled
+      return
+    end
+  end
+end
+
+local function update_profile_rows(name)
+  local managed = state.manage
+  if managed == nil or managed.profiles == nil then
+    return
+  end
+  for index = 1, #managed.profiles.rows do
+    managed.profiles.rows[index].active = managed.profiles.rows[index].name == name
+  end
+  managed.profiles.active = name
+end
+
+-- Re-read the settings after a profile switch: the selected chain can change
+-- every effective value. The plugin/profile lists are kept as they were.
+local function refresh_settings_after_profile()
+  local managed = state.manage
+  if managed == nil then
+    return
+  end
+  local fresh, err = config.collect(bitty, managed, {})
+  if fresh ~= nil then
+    fresh.plugins = managed.plugins
+    fresh.profiles = managed.profiles
+    state.manage = fresh
+  elseif config.is_blocked(err) then
+    block_manage()
+  end
+end
+
+-- Second Enter: apply the previewed change with its one-shot digest.
+local function apply_pending()
+  local pending = state.edit
+  if pending.mode ~= edit.MODE_CONFIRM then
+    return
+  end
+
+  if pending.target == edit.TARGET_CONFIG then
+    local result, err = config.set(bitty, pending.subject, pending.value, pending.digest)
+    if result == nil then
+      if err.code == config.CODE_STALE then
+        repreview(pending, "the value changed, review again")
+      elseif err.code == config.CODE_APPROVAL_REQUIRED or err.code == config.CODE_APPROVAL_MISMATCH then
+        repreview(pending, "approval expired, review again")
+      else
+        write_failure(err)
+      end
+      return
+    end
+    update_setting_row(pending.subject, pending.value, result.applied)
+    refresh_snapshot()
+    local note = result.applied and ("applied · reload " .. reload_note(result.reload)) or "no change"
+    state.edit = edit.notice(edit.new(), note)
+    return
+  end
+
+  if pending.target == edit.TARGET_PLUGIN then
+    local result, err = config.set_enabled(bitty, pending.subject, pending.value, pending.digest)
+    if result == nil then
+      if err.code == config.CODE_STALE then
+        repreview(pending, "the ledger changed, review again")
+      elseif err.code == config.CODE_APPROVAL_REQUIRED or err.code == config.CODE_APPROVAL_MISMATCH then
+        repreview(pending, "approval expired, review again")
+      else
+        write_failure(err)
+      end
+      return
+    end
+    update_plugin_row(pending.subject, pending.value)
+    refresh_snapshot()
+    local note
+    if result.changed then
+      note = (pending.value and "enabled " or "disabled ")
+        .. pending.subject
+        .. " · reload "
+        .. reload_note(result.reload)
+    else
+      note = "no change"
+    end
+    state.edit = edit.notice(edit.new(), note)
+    return
+  end
+
+  local result, err = config.use(bitty, pending.subject, pending.digest)
+  if result == nil then
+    if err.code == config.CODE_STALE then
+      repreview(pending, "the profile selector changed, review again")
+    elseif err.code == config.CODE_APPROVAL_REQUIRED or err.code == config.CODE_APPROVAL_MISMATCH then
+      repreview(pending, "approval expired, review again")
+    else
+      write_failure(err)
+    end
+    return
+  end
+  local active = result.active ~= "" and result.active or pending.subject
+  update_profile_rows(active)
+  refresh_settings_after_profile()
+  refresh_snapshot()
+  local note
+  if result.changed then
+    note = "profile " .. active .. " active · reload " .. reload_note(result.reload)
+  else
+    note = "no change"
+  end
+  if result.pending_restart then
+    note = note .. " · restart required"
+  end
+  state.edit = edit.notice(edit.new(), note)
+end
+
+-- Activate the selected row in browse mode. Returns whether the key was
+-- consumed; a read-only tab consumes nothing and keeps the old navigation.
+local function activate_selected(named, literal)
+  local section = model.section(state.nav.index)
+  local is_enter = named == "enter"
+  local is_space = named == " " or literal == " "
+  if not is_enter and not is_space then
+    return false
+  end
+  if section.id == "settings" then
+    if not is_enter then
+      return false
+    end
+    local item = selected_managed_row("settings")
+    if item == nil then
+      return false
+    end
+    begin_setting_edit(item)
+    return true
+  end
+  if section.id == "plugins" then
+    local item = selected_managed_row("plugins")
+    if item == nil then
+      return false
+    end
+    begin_plugin_toggle(item)
+    return true
+  end
+  if section.id == "profiles" then
+    if not is_enter then
+      return false
+    end
+    local item = selected_managed_row("profiles")
+    if item == nil then
+      return false
+    end
+    begin_profile_use(item)
+    return true
+  end
+  return false
+end
+
+-- Handle one captured key while an input or confirm step is active.
+-- Returns `handled, changed`.
+local function handle_edit_key(event)
+  local named = key_named(event)
+  if state.edit.mode == edit.MODE_INPUT then
+    if named == "enter" then
+      local value, message = edit.parse_value(state.edit.kind, state.edit.buffer or "")
+      if value == nil then
+        state.edit = edit.invalid(state.edit, message)
+        return true, true
+      end
+      local subject = state.edit.subject
+      preview_config(subject, value)
+      return true, true
+    end
+    if named == "escape" then
+      state.edit = edit.cancel(state.edit)
+      return true, true
+    end
+    if named == "backspace" then
+      state.edit = edit.backspace(state.edit)
+      return true, true
+    end
+    local char = key_char(event)
+    if char ~= nil then
+      state.edit = edit.append(state.edit, char)
+      return true, true
+    end
+    return true, false
+  end
+  if state.edit.mode == edit.MODE_CONFIRM then
+    if named == "enter" then
+      apply_pending()
+      return true, true
+    end
+    if named == "escape" then
+      state.edit = edit.cancel(state.edit)
+      return true, true
+    end
+    return true, false
+  end
+  return false, false
+end
+
 -- Drain queued capture input and apply it to navigation. Bounded by
 -- `POLL_MAX` per call; stops as soon as the session ends.
 function M.drain()
@@ -276,22 +840,46 @@ function M.drain()
     return false
   end
 
-  local view = model.build(state.data, state.nav, { height = state.height })
-  local opts = { row_count = #view.rows, page = view.page }
   local events = type(poll.events) == "table" and poll.events or {}
   local changed = false
   for index = 1, #events do
     local event = events[index]
-    local next_nav, action, moved = model.apply_key(state.nav, event, opts)
-    state.nav = next_nav
-    changed = changed or moved
-    if action == model.ACTION_CLOSE then
-      M.close("cancelled")
-      return true
-    end
-    if action == model.ACTION_REFRESH then
-      collect()
-      changed = true
+    if state.edit.mode ~= edit.MODE_BROWSE then
+      local handled, edit_changed = handle_edit_key(event)
+      if handled then
+        changed = changed or edit_changed
+      end
+    else
+      local named, literal = key_named(event)
+      if activate_selected(named, literal) then
+        changed = true
+      else
+        local view = model.build(state.data, state.nav, { height = state.height })
+        local opts = { row_count = #view.rows, page = view.page }
+        local section_before = state.nav.index
+        local cursor_before = state.nav.cursor
+        local next_nav, action, moved = model.apply_key(state.nav, model_event(event), opts)
+        state.nav = next_nav
+        if state.nav.index ~= section_before then
+          state.edit = edit.new()
+          collect_list(model.section(state.nav.index).id)
+          load_selected_value()
+        elseif state.nav.cursor ~= cursor_before then
+          load_selected_value()
+        end
+        changed = changed or moved
+        if action == model.ACTION_CLOSE then
+          M.close("cancelled")
+          return true
+        end
+        if action == model.ACTION_REFRESH then
+          -- A refresh drops the cached values so the selected row is read
+          -- again from the host.
+          state.manage = nil
+          collect()
+          changed = true
+        end
+      end
     end
   end
   if changed and not paint() then
@@ -322,12 +910,17 @@ function M.status()
     open = state.open,
     section = section.id,
     offset = state.nav.offset,
+    cursor = state.nav.cursor,
     error = state.error and state.error.code or nil,
     handle = state.handle,
     timer = state.timer ~= nil,
     rearms = state.rearms,
     width = state.width,
     height = state.height,
+    mode = state.edit.mode,
+    notice = state.edit.notice,
+    manage = state.data ~= nil and state.data.manage ~= nil,
+    blocked = state.config_blocked,
   }
 end
 
@@ -340,6 +933,8 @@ end
 M.render = render
 M.model = model
 M.inspect = inspect
+M.config = config
+M.edit = edit
 
 if bitty == nil or type(bitty) ~= "table" then
   return M
@@ -348,7 +943,7 @@ end
 bitty.commands.register({
   id = "toggle_dashboard",
   title = "Dashboard: toggle",
-  description = "Open or close the read-only configuration and status dashboard.",
+  description = "Open or close the configuration and status dashboard.",
   args_schema = {
     type = "object",
     properties = {

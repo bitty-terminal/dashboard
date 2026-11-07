@@ -3,8 +3,8 @@
  *
  * The authoritative manifest validator and README checker come from the
  * pinned bitty-plugin-sdk commit. This test asserts the plugin-specific
- * invariants the dashboard promises: exactly two least-privilege grants, one
- * lazy command, three observation events, and a README that matches the SDK
+ * invariants the dashboard promises: three least-privilege grants, one lazy
+ * command, three observation events, and a README that matches the SDK
  * user-documentation contract.
  */
 
@@ -28,29 +28,29 @@ describe("bitty-plugin.toml", () => {
     expect(errors).toEqual([]);
   });
 
-  test("declares the dashboard identity and 0.0.26 compatibility floor", () => {
+  test("declares the dashboard identity and 0.0.31 compatibility floor", () => {
     const model = loadManifestModel(manifestSource);
     expect(model.pluginId).toBe("bitty-terminal.dashboard");
     expect(model.name).toBe("Dashboard");
-    expect(model.version).toBe("0.0.1");
+    expect(model.version).toBe("0.2.0");
     expect(model.pluginApiRange).toBe("^1.0");
-    expect(manifestSource).toContain('bitty = ">=0.0.26"');
+    expect(manifestSource).toContain('bitty = ">=0.0.31"');
     // Minimum-only: a declared ceiling would reject newer compatible hosts.
-    expect(manifestSource).not.toMatch(/bitty = ">=0\.0\.26,/);
+    expect(manifestSource).not.toMatch(/bitty = ">=0\.0\.31,/);
   });
 
-  test("requests exactly the two least-privilege grants", () => {
+  test("requests exactly the three least-privilege grants", () => {
     const model = loadManifestModel(manifestSource);
     expect([...model.capabilities].sort()).toEqual([
+      "config.manage",
       "runtime.inspect",
       "ui.overlay.focus",
     ]);
   });
 
-  test("never requests write, focus-capture, process, or filesystem authority", () => {
+  test("never requests host-management, process, or filesystem authority", () => {
     const model = loadManifestModel(manifestSource);
     for (const forbidden of [
-      "config.manage",
       "runtime.configure",
       "runtime.plugin-manage",
       "terminal.input.all",
@@ -95,8 +95,13 @@ describe("README", () => {
     expect(result.valid).toBe(true);
   });
 
-  test("states that settings editing is deferred", () => {
+  test("documents the preview/confirm flow and the editable keys", () => {
     expect(readmeSource).toContain("config.manage");
     expect(readmeSource).toContain("#2393");
+    expect(readmeSource).toContain("preview");
+    expect(readmeSource).toContain("digest");
+    expect(readmeSource).toContain("appearance.theme");
+    expect(readmeSource).toContain("terminal.scrollback");
+    expect(readmeSource).not.toContain("deferred until");
   });
 });

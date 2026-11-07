@@ -1,9 +1,9 @@
 {
   "name": "dashboard",
-  "version": "0.0.1",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Read-only configuration and status dashboard plugin for the Bitty terminal.",
+  "description": "Configuration and status dashboard plugin for the Bitty terminal.",
   "license": "MIT",
   "packageManager": "bun@1.4.2",
   "devDependencies": {
