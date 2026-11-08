@@ -1,0 +1,11 @@
+{
+  "created_at": "2026-11-08T15:30:15.983102976+00:00",
+  "git_common_dir": "***REDACTED-PATH***",
+  "id": "01M6XWG6SFDJS62BAREJ1TP9T7",
+  "main_branch": "main",
+  "name": "dashboard",
+  "repository_root": "***REDACTED-PATH***",
+  "schema_version": 4,
+  "task_prefix": "CTX",
+  "updated_at": "2026-11-08T15:30:15.983102976+00:00"
+}
