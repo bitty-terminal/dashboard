@@ -252,7 +252,7 @@ local function extension_rows(section)
     local item = section.rows[index]
     local digest = item.digest
     if #digest > 24 then
-      digest = string.sub(digest, 1, 24) .. text.ELLIPSIS
+      digest = text.slice_bytes(digest, 24) .. text.ELLIPSIS
     end
     rows[#rows + 1] = row(join({
       item.name,
