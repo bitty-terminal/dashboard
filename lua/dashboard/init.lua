@@ -544,6 +544,152 @@ local function begin_profile_use(item)
   })
 end
 
+local function preview_profile_create(name, opts, notice)
+  if not config.profile_lifecycle(bitty) then
+    state.edit = edit.notice(state.edit, "profile lifecycle unavailable on this host")
+    return false
+  end
+  local preview, err = config.preview_create(bitty, name, opts)
+  if preview == nil then
+    write_failure(err)
+    return false
+  end
+  state.edit = edit.start_confirm(state.edit, {
+    target = edit.TARGET_PROFILE_CREATE,
+    subject = name,
+    kind = config.KIND_TEXT,
+    value = name,
+    opts = opts,
+    preview = preview,
+    notice = notice,
+  })
+  return true
+end
+
+local function preview_profile_clone(src, dst, opts, notice)
+  if not config.profile_lifecycle(bitty) then
+    state.edit = edit.notice(state.edit, "profile lifecycle unavailable on this host")
+    return false
+  end
+  local preview, err = config.preview_clone(bitty, src, dst, opts)
+  if preview == nil then
+    write_failure(err)
+    return false
+  end
+  state.edit = edit.start_confirm(state.edit, {
+    target = edit.TARGET_PROFILE_CLONE,
+    subject = src,
+    kind = config.KIND_TEXT,
+    value = dst,
+    opts = opts,
+    preview = preview,
+    notice = notice,
+  })
+  return true
+end
+
+local function preview_profile_rename(old_name, new_name, opts, notice)
+  if not config.profile_lifecycle(bitty) then
+    state.edit = edit.notice(state.edit, "profile lifecycle unavailable on this host")
+    return false
+  end
+  local preview, err = config.preview_rename(bitty, old_name, new_name, opts)
+  if preview == nil then
+    write_failure(err)
+    return false
+  end
+  state.edit = edit.start_confirm(state.edit, {
+    target = edit.TARGET_PROFILE_RENAME,
+    subject = old_name,
+    kind = config.KIND_TEXT,
+    value = new_name,
+    opts = opts,
+    preview = preview,
+    notice = notice,
+  })
+  return true
+end
+
+local function preview_profile_delete(name, opts, notice)
+  if not config.profile_lifecycle(bitty) then
+    state.edit = edit.notice(state.edit, "profile lifecycle unavailable on this host")
+    return false
+  end
+  local preview, err = config.preview_delete(bitty, name, opts)
+  if preview == nil then
+    write_failure(err)
+    return false
+  end
+  state.edit = edit.start_confirm(state.edit, {
+    target = edit.TARGET_PROFILE_DELETE,
+    subject = name,
+    kind = config.KIND_TEXT,
+    value = nil,
+    opts = opts,
+    preview = preview,
+    notice = notice,
+  })
+  return true
+end
+
+local function begin_profile_create(opts)
+  if not config.profile_lifecycle(bitty) then
+    state.edit = edit.notice(state.edit, "profile lifecycle unavailable on this host")
+    return
+  end
+  state.edit = edit.start_input(state.edit, {
+    target = edit.TARGET_PROFILE_CREATE,
+    subject = "",
+    kind = config.KIND_TEXT,
+    opts = opts,
+    seed = "",
+    prompt = "new profile = ",
+  })
+end
+
+local function begin_profile_clone(item, opts)
+  if item == nil then
+    return
+  end
+  if not config.profile_lifecycle(bitty) then
+    state.edit = edit.notice(state.edit, "profile lifecycle unavailable on this host")
+    return
+  end
+  state.edit = edit.start_input(state.edit, {
+    target = edit.TARGET_PROFILE_CLONE,
+    subject = item.name,
+    kind = config.KIND_TEXT,
+    opts = opts,
+    seed = item.name .. "-copy",
+    prompt = "clone " .. item.name .. " as = ",
+  })
+end
+
+local function begin_profile_rename(item, opts)
+  if item == nil then
+    return
+  end
+  if not config.profile_lifecycle(bitty) then
+    state.edit = edit.notice(state.edit, "profile lifecycle unavailable on this host")
+    return
+  end
+  state.edit = edit.start_input(state.edit, {
+    target = edit.TARGET_PROFILE_RENAME,
+    subject = item.name,
+    kind = config.KIND_TEXT,
+    opts = opts,
+    seed = item.name,
+    prompt = "rename " .. item.name .. " to = ",
+  })
+end
+
+local function begin_profile_delete(item, opts)
+  if item == nil then
+    return
+  end
+  preview_profile_delete(item.name, opts)
+end
+
 -- Re-run the preview for one pending intent. Used after a stale digest or an
 -- expired approval: the user reviews the fresh rendering before the second
 -- Enter.
@@ -553,6 +699,14 @@ local function repreview(pending, notice)
     preview, err = config.preview(bitty, pending.subject, pending.value)
   elseif pending.target == edit.TARGET_PLUGIN then
     preview, err = config.preview_enabled(bitty, pending.subject, pending.value)
+  elseif pending.target == edit.TARGET_PROFILE_CREATE then
+    preview, err = config.preview_create(bitty, pending.subject, pending.opts)
+  elseif pending.target == edit.TARGET_PROFILE_CLONE then
+    preview, err = config.preview_clone(bitty, pending.subject, pending.value, pending.opts)
+  elseif pending.target == edit.TARGET_PROFILE_RENAME then
+    preview, err = config.preview_rename(bitty, pending.subject, pending.value, pending.opts)
+  elseif pending.target == edit.TARGET_PROFILE_DELETE then
+    preview, err = config.preview_delete(bitty, pending.subject, pending.opts)
   else
     preview, err = config.preview_use(bitty, pending.subject)
   end
@@ -565,6 +719,7 @@ local function repreview(pending, notice)
     subject = pending.subject,
     kind = pending.kind,
     value = pending.value,
+    opts = pending.opts,
     preview = preview,
     notice = notice,
   })
@@ -629,6 +784,72 @@ local function update_profile_rows(name)
     managed.profiles.rows[index].active = managed.profiles.rows[index].name == name
   end
   managed.profiles.active = name
+end
+
+local function insert_or_select_profile_row(name)
+  local managed = state.manage
+  if managed == nil or managed.profiles == nil then
+    return
+  end
+  local rows = managed.profiles.rows
+  for index = 1, #rows do
+    if rows[index].name == name then
+      state.nav.cursor = index - 1
+      return
+    end
+  end
+  rows[#rows + 1] = { name = name, active = (managed.profiles.active == name) }
+  state.nav.cursor = #rows - 1
+end
+
+local function rename_profile_row(old_name, new_name, selector_updated)
+  local managed = state.manage
+  if managed == nil or managed.profiles == nil then
+    return
+  end
+  local rows = managed.profiles.rows
+  local kept = {}
+  local selected = nil
+  local was_active = (managed.profiles.active == old_name) or selector_updated == true
+  for index = 1, #rows do
+    local row = rows[index]
+    if row.name == old_name then
+      was_active = was_active or row.active == true
+      kept[#kept + 1] = { name = new_name, active = was_active }
+      selected = #kept - 1
+    elseif row.name ~= new_name then
+      kept[#kept + 1] = row
+    end
+  end
+  if selected == nil then
+    kept[#kept + 1] = { name = new_name, active = was_active }
+    selected = #kept - 1
+  end
+  managed.profiles.rows = kept
+  if was_active then
+    managed.profiles.active = new_name
+  end
+  state.nav.cursor = selected
+end
+
+local function remove_profile_row(name, was_active)
+  local managed = state.manage
+  if managed == nil or managed.profiles == nil then
+    return
+  end
+  local rows = managed.profiles.rows
+  local kept = {}
+  for index = 1, #rows do
+    if rows[index].name ~= name then
+      kept[#kept + 1] = rows[index]
+    elseif rows[index].active then
+      was_active = true
+    end
+  end
+  managed.profiles.rows = kept
+  if was_active or managed.profiles.active == name then
+    managed.profiles.active = ""
+  end
 end
 
 -- Re-read the settings after a profile switch: the selected chain can change
@@ -701,6 +922,96 @@ local function apply_pending()
     return
   end
 
+  if pending.target == edit.TARGET_PROFILE_CREATE then
+    local result, err = config.create(bitty, pending.subject, pending.opts, pending.digest)
+    if result == nil then
+      if err.code == config.CODE_STALE then
+        repreview(pending, "the profile changed, review again")
+      elseif err.code == config.CODE_APPROVAL_REQUIRED or err.code == config.CODE_APPROVAL_MISMATCH then
+        repreview(pending, "approval expired, review again")
+      else
+        write_failure(err)
+      end
+      return
+    end
+    local name = result.name ~= "" and result.name or pending.subject
+    insert_or_select_profile_row(name)
+    refresh_snapshot()
+    local note = result.changed and ("created profile " .. name .. " · reload " .. reload_note(result.reload))
+      or "no change"
+    state.edit = edit.notice(edit.new(), note)
+    return
+  end
+
+  if pending.target == edit.TARGET_PROFILE_CLONE then
+    local result, err = config.clone(bitty, pending.subject, pending.value, pending.opts, pending.digest)
+    if result == nil then
+      if err.code == config.CODE_STALE then
+        repreview(pending, "the profile changed, review again")
+      elseif err.code == config.CODE_APPROVAL_REQUIRED or err.code == config.CODE_APPROVAL_MISMATCH then
+        repreview(pending, "approval expired, review again")
+      else
+        write_failure(err)
+      end
+      return
+    end
+    local name = result.name ~= "" and result.name or pending.value
+    insert_or_select_profile_row(name)
+    refresh_snapshot()
+    local note = result.changed
+        and ("cloned profile " .. pending.subject .. " to " .. name .. " · reload " .. reload_note(result.reload))
+      or "no change"
+    state.edit = edit.notice(edit.new(), note)
+    return
+  end
+
+  if pending.target == edit.TARGET_PROFILE_RENAME then
+    local result, err = config.rename(bitty, pending.subject, pending.value, pending.opts, pending.digest)
+    if result == nil then
+      if err.code == config.CODE_STALE then
+        repreview(pending, "the profile changed, review again")
+      elseif err.code == config.CODE_APPROVAL_REQUIRED or err.code == config.CODE_APPROVAL_MISMATCH then
+        repreview(pending, "approval expired, review again")
+      else
+        write_failure(err)
+      end
+      return
+    end
+    local old_name = result.old_name ~= "" and result.old_name or pending.subject
+    local new_name = result.new_name ~= "" and result.new_name or pending.value
+    rename_profile_row(old_name, new_name, result.selector_updated)
+    if result.selector_updated then
+      refresh_settings_after_profile()
+    end
+    refresh_snapshot()
+    local note = result.changed
+        and ("renamed profile " .. old_name .. " to " .. new_name .. " · reload " .. reload_note(result.reload))
+      or "no change"
+    state.edit = edit.notice(edit.new(), note)
+    return
+  end
+
+  if pending.target == edit.TARGET_PROFILE_DELETE then
+    local result, err = config.delete(bitty, pending.subject, pending.opts, pending.digest)
+    if result == nil then
+      if err.code == config.CODE_STALE then
+        repreview(pending, "the profile changed, review again")
+      elseif err.code == config.CODE_APPROVAL_REQUIRED or err.code == config.CODE_APPROVAL_MISMATCH then
+        repreview(pending, "approval expired, review again")
+      else
+        write_failure(err)
+      end
+      return
+    end
+    local name = result.name ~= "" and result.name or pending.subject
+    remove_profile_row(name, result.was_active)
+    refresh_snapshot()
+    local note = result.changed and ("deleted profile " .. name .. " · reload " .. reload_note(result.reload))
+      or "no change"
+    state.edit = edit.notice(edit.new(), note)
+    return
+  end
+
   local result, err = config.use(bitty, pending.subject, pending.digest)
   if result == nil then
     if err.code == config.CODE_STALE then
@@ -734,6 +1045,46 @@ local function activate_selected(named, literal)
   local section = model.section(state.nav.index)
   local is_enter = named == "enter"
   local is_space = named == " " or literal == " "
+  if section.id == "profiles" then
+    local managed = state.data and state.data.manage
+    if managed == nil or managed.profiles == nil then
+      return false
+    end
+    local item = selected_managed_row("profiles")
+    if is_enter then
+      if item == nil then
+        return false
+      end
+      begin_profile_use(item)
+      return true
+    end
+    if literal == "n" or literal == "a" then
+      begin_profile_create()
+      return true
+    end
+    if literal == "c" then
+      if item == nil then
+        return false
+      end
+      begin_profile_clone(item)
+      return true
+    end
+    if literal == "e" or literal == "R" then
+      if item == nil then
+        return false
+      end
+      begin_profile_rename(item)
+      return true
+    end
+    if literal == "d" or literal == "x" or named == "delete" then
+      if item == nil then
+        return false
+      end
+      begin_profile_delete(item)
+      return true
+    end
+    return false
+  end
   if not is_enter and not is_space then
     return false
   end
@@ -756,17 +1107,6 @@ local function activate_selected(named, literal)
     begin_plugin_toggle(item)
     return true
   end
-  if section.id == "profiles" then
-    if not is_enter then
-      return false
-    end
-    local item = selected_managed_row("profiles")
-    if item == nil then
-      return false
-    end
-    begin_profile_use(item)
-    return true
-  end
   return false
 end
 
@@ -781,8 +1121,18 @@ local function handle_edit_key(event)
         state.edit = edit.invalid(state.edit, message)
         return true, true
       end
+      local target = state.edit.target
       local subject = state.edit.subject
-      preview_config(subject, value)
+      local opts = state.edit.opts
+      if target == edit.TARGET_PROFILE_CREATE then
+        preview_profile_create(value, opts)
+      elseif target == edit.TARGET_PROFILE_CLONE then
+        preview_profile_clone(subject, value, opts)
+      elseif target == edit.TARGET_PROFILE_RENAME then
+        preview_profile_rename(subject, value, opts)
+      else
+        preview_config(subject, value)
+      end
       return true, true
     end
     if named == "escape" then

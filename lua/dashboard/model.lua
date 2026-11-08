@@ -34,6 +34,7 @@ M.OVERVIEW_EDITABLE_NOTE = "Settings, plugins, and profiles are editable from th
 M.ACTION_HINT_SETTINGS = "Enter edit"
 M.ACTION_HINT_PLUGINS = "Space toggle"
 M.ACTION_HINT_PROFILES = "Enter use"
+M.ACTION_HINT_PROFILES_LIFECYCLE = "Enter use · n new · c clone · e rename · d delete"
 
 M.ACTION_NONE = "none"
 M.ACTION_CLOSE = "close"
@@ -484,7 +485,9 @@ function M.build(data, state, opts)
   elseif section.id == "profiles" then
     if managed_section ~= nil then
       view.rows = managed_profile_rows(managed_section)
-      view.action_hint = M.ACTION_HINT_PROFILES
+      view.action_hint = managed_section.lifecycle == true
+          and M.ACTION_HINT_PROFILES_LIFECYCLE
+        or M.ACTION_HINT_PROFILES
     else
       view.rows = profile_rows(source)
     end

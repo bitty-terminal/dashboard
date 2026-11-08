@@ -139,8 +139,15 @@ The preview/confirm flow is always the same:
 Plugins and profiles use the same two-press contract with their own pairs:
 `bitty.config.preview_enabled()` then `bitty.config.set_enabled()` on the
 Plugins tab, and `bitty.profiles.preview_use()` then `bitty.profiles.use()` on
-the Profiles tab. A profile switch that cannot take effect in the running
-process reports `restart required` from the host's `pending_restart` flag.
+the Profiles tab. When the host exposes the profile lifecycle verbs
+(bitty#2449, bitty#3035), the Profiles tab also supports creating (`n`/`a`,
+`preview_create`/`create`), cloning (`c`, `preview_clone`/`clone`), renaming
+(`e`/`R`, `preview_rename`/`rename`), and deleting (`d`/`x`,
+`preview_delete`/`delete`) profiles with the same preview and one-shot digest
+confirmation; on a host that only exposes `preview_use`/`use`, those keys
+report a non-blocking notice while keeping profile switching active. A profile
+switch that cannot take effect in the running process reports `restart required`
+from the host's `pending_restart` flag.
 
 If the host does not expose the surface, the grant is missing, the backend is
 unwired (`--safe`), or the user layer is not a safe target, every tab keeps the
@@ -179,6 +186,10 @@ While the panel is open it owns a transient input capture, so its own keys are:
 | Mouse wheel           | Scroll the active section                                        |
 | `Enter`               | Edit the selected setting, or preview the selected toggle/switch |
 | `Space`               | Toggle the selected plugin                                       |
+| `n` / `a`             | Create a new profile on the Profiles tab                         |
+| `c`                   | Clone the selected profile on the Profiles tab                   |
+| `e` / `R`             | Rename the selected profile on the Profiles tab                  |
+| `d` / `x`             | Preview deleting the selected profile on the Profiles tab        |
 | `Enter` (again)       | Apply the previewed change                                       |
 | `Esc`                 | Cancel the edit or confirm step, or close the panel              |
 | `r`                   | Re-read the snapshot and the managed values                      |
@@ -273,7 +284,7 @@ with the SDK-pinned `bitty-plugin-lint`, validates this README against the SDK
 user-documentation contract, parses every Lua source with `luac5.4 -p` (plus a
 fail-closed parser control), and runs two suites:
 
-- `lua5.4 tests/run.lua` — 107 behavior checks over display bounds, snapshot
+- `lua5.4 tests/run.lua` — 110 behavior checks over display bounds, snapshot
   normalization, path redaction, section rows, both layouts (80×24 and
   120×40), direct-child overlay flattening, key and wheel navigation, the
   overlay lifecycle and its error/timeout release paths, the `config.manage`

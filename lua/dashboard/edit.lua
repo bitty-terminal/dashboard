@@ -23,6 +23,10 @@ M.MODE_CONFIRM = "confirm"
 M.TARGET_CONFIG = "config"
 M.TARGET_PLUGIN = "plugin"
 M.TARGET_PROFILE = "profile"
+M.TARGET_PROFILE_CREATE = "profile_create"
+M.TARGET_PROFILE_CLONE = "profile_clone"
+M.TARGET_PROFILE_RENAME = "profile_rename"
+M.TARGET_PROFILE_DELETE = "profile_delete"
 
 M.MAX_INPUT_BYTES = 256
 M.MAX_NOTICE_BYTES = 96
@@ -40,6 +44,7 @@ local function copy(state)
     subject = state.subject,
     kind = state.kind,
     value = state.value,
+    opts = state.opts,
     buffer = state.buffer,
     prompt = state.prompt,
     digest = state.digest,
@@ -57,6 +62,7 @@ function M.start_input(state, opts)
   next_state.target = opts.target
   next_state.subject = opts.subject
   next_state.kind = opts.kind
+  next_state.opts = opts.opts
   next_state.buffer = text.single_line(opts.seed or "")
   next_state.prompt = opts.prompt
   next_state.digest = nil
@@ -74,6 +80,7 @@ function M.start_confirm(state, opts)
   next_state.subject = opts.subject
   next_state.kind = opts.kind
   next_state.value = opts.value
+  next_state.opts = opts.opts
   next_state.buffer = nil
   next_state.prompt = nil
   next_state.digest = opts.preview.digest
@@ -92,6 +99,7 @@ function M.notice(state, message)
   next_state.subject = nil
   next_state.kind = nil
   next_state.value = nil
+  next_state.opts = nil
   next_state.buffer = nil
   next_state.prompt = nil
   next_state.digest = nil
@@ -234,6 +242,14 @@ function M.confirm_rows(state)
     title = (state.value == true and "Enable " or "Disable ") .. tostring(state.subject)
   elseif state.target == M.TARGET_PROFILE then
     title = "Switch profile to " .. tostring(state.subject)
+  elseif state.target == M.TARGET_PROFILE_CREATE then
+    title = "Create profile " .. tostring(state.subject)
+  elseif state.target == M.TARGET_PROFILE_CLONE then
+    title = "Clone profile " .. tostring(state.subject) .. " to " .. tostring(state.value)
+  elseif state.target == M.TARGET_PROFILE_RENAME then
+    title = "Rename profile " .. tostring(state.subject) .. " to " .. tostring(state.value)
+  elseif state.target == M.TARGET_PROFILE_DELETE then
+    title = "Delete profile " .. tostring(state.subject)
   else
     title = "Apply change"
   end

@@ -11,9 +11,17 @@
 --   bitty.plugins.list()                      -> { rows = { { id, enabled, managed, source, version } }, truncated }
 --   bitty.config.preview_enabled(id, enabled) -> { digest, rendered, keys, changed }
 --   bitty.config.set_enabled(id, enabled, d)  -> { changed, reload }
---   bitty.profiles.list()                     -> { rows = { { name, active } }, active, truncated }
---   bitty.profiles.preview_use(name)          -> { digest, rendered, keys, changed }
---   bitty.profiles.use(name, digest)          -> { active, changed, reload, pending_restart }
+--   bitty.profiles.list()                            -> { rows = { { name, active } }, active, truncated }
+--   bitty.profiles.preview_use(name)                 -> { digest, rendered, keys, changed }
+--   bitty.profiles.use(name, digest)                 -> { active, changed, reload, pending_restart }
+--   bitty.profiles.preview_create(name, opts?)       -> { digest, rendered, changed_keys, changed, replaces_existing, selector_updated, active }
+--   bitty.profiles.create(name, opts_or_digest, d?)  -> { name, created, changed, replaced, backed_up, extends, preset, reload }
+--   bitty.profiles.preview_clone(src, dst, opts?)    -> { digest, rendered, changed_keys, changed, replaces_existing, selector_updated, active }
+--   bitty.profiles.clone(src, dst, opts_or_d, d?)    -> { source, name, target, cloned, changed, replaced, backed_up, extends, reload }
+--   bitty.profiles.preview_rename(old, new, opts?)   -> { digest, rendered, changed_keys, changed, replaces_existing, selector_updated, active }
+--   bitty.profiles.rename(old, new, opts_or_d, d?)   -> { old_name, new_name, name, renamed, changed, replaced, backed_up, selector_updated, reload }
+--   bitty.profiles.preview_delete(name, opts?)       -> { digest, rendered, changed_keys, changed, replaces_existing, selector_updated, active }
+--   bitty.profiles.delete(name, opts_or_d, d?)       -> { name, deleted, changed, backed_up, was_active, reload }
 --
 -- Every write needs the one-shot digest from the matching preview. Nothing in
 -- this module guesses at a value: the typed scalar and its kind come from the
@@ -47,6 +55,8 @@ M.CODE_INVALID = "E_CONFIG_INVALID"
 M.CODE_UNAVAILABLE = "E_CONFIG_UNAVAILABLE"
 M.CODE_LIMIT = "E_DEF_LIMIT"
 M.CODE_MALFORMED = "E_CONFIG_MALFORMED"
+M.CODE_PROFILE_CONFLICT = "E_PROFILE_CONFLICT"
+M.CODE_PROFILE_NOT_FOUND = "E_PROFILE_NOT_FOUND"
 
 -- Display bounds. The host already bounds every payload; these are defense in
 -- depth for a malformed or hostile reply.
@@ -173,6 +183,20 @@ local function function_at(host, name, method)
   return fn
 end
 
+-- Resolve a profile verb from `bitty.profiles` or its read-only proxy alias
+-- `bitty.config.profiles` (bitty#3047).
+local function profile_fn(host, method)
+  local fn = function_at(host, "profiles", method)
+  if fn ~= nil then
+    return fn
+  end
+  local cfg = table_at(host, "config")
+  if cfg == nil then
+    return nil
+  end
+  return function_at(cfg, "profiles", method)
+end
+
 -- Whether the host exposes the bounded read query at all. An older host has
 -- no `config` namespace, so the panel keeps its read-only rendering.
 function M.readable(host)
@@ -194,9 +218,21 @@ end
 
 function M.switchable(host)
   return M.writable(host)
-    and function_at(host, "profiles", "list") ~= nil
-    and function_at(host, "profiles", "preview_use") ~= nil
-    and function_at(host, "profiles", "use") ~= nil
+    and profile_fn(host, "list") ~= nil
+    and profile_fn(host, "preview_use") ~= nil
+    and profile_fn(host, "use") ~= nil
+end
+
+function M.profile_lifecycle(host)
+  return M.switchable(host)
+    and profile_fn(host, "preview_create") ~= nil
+    and profile_fn(host, "create") ~= nil
+    and profile_fn(host, "preview_clone") ~= nil
+    and profile_fn(host, "clone") ~= nil
+    and profile_fn(host, "preview_rename") ~= nil
+    and profile_fn(host, "rename") ~= nil
+    and profile_fn(host, "preview_delete") ~= nil
+    and profile_fn(host, "delete") ~= nil
 end
 
 local function invoke(fn, ...)
@@ -358,11 +394,15 @@ local function preview_result(raw, fallback)
   if digest == nil then
     return nil, M.error(M.CODE_MALFORMED, fallback .. " returned no approval digest")
   end
+  local raw_keys = type(raw.keys) == "table" and raw.keys or raw.changed_keys
   return {
     digest = digest,
     lines = M.diff_lines(raw.rendered),
-    keys = key_list(raw.keys),
+    keys = key_list(raw_keys),
     changed = raw.changed == nil and true or boolean(raw.changed),
+    replaces_existing = boolean(raw.replaces_existing),
+    selector_updated = boolean(raw.selector_updated),
+    active = boolean(raw.active),
   }
 end
 
@@ -462,7 +502,7 @@ end
 
 -- `bitty.profiles.list()`: validated names plus the active marker.
 function M.profiles(host)
-  local fn = function_at(host, "profiles", "list")
+  local fn = profile_fn(host, "list")
   if fn == nil then
     return nil, M.error(M.CODE_UNAVAILABLE, "host has no profiles.list surface")
   end
@@ -472,7 +512,8 @@ function M.profiles(host)
   end
   local rows = {}
   local truncated = raw.truncated == true
-  local source_rows = type(raw.rows) == "table" and raw.rows or {}
+  local source_rows = type(raw.rows) == "table" and raw.rows
+    or (type(raw.profiles) == "table" and raw.profiles or {})
   for index = 1, #source_rows do
     if #rows >= M.MAX_ROWS then
       truncated = true
@@ -490,12 +531,13 @@ function M.profiles(host)
     rows = rows,
     active = text.field(raw.active, M.MAX_NAME_BYTES),
     truncated = truncated,
+    lifecycle = M.profile_lifecycle(host),
   }
 end
 
 -- `bitty.profiles.preview_use(name)`.
 function M.preview_use(host, name)
-  local fn = function_at(host, "profiles", "preview_use")
+  local fn = profile_fn(host, "preview_use")
   if fn == nil then
     return nil, M.error(M.CODE_UNAVAILABLE, "host has no profiles.preview_use surface")
   end
@@ -508,7 +550,7 @@ end
 
 -- `bitty.profiles.use(name, digest)`.
 function M.use(host, name, digest)
-  local fn = function_at(host, "profiles", "use")
+  local fn = profile_fn(host, "use")
   if fn == nil then
     return nil, M.error(M.CODE_UNAVAILABLE, "host has no profiles.use surface")
   end
@@ -521,6 +563,205 @@ function M.use(host, name, digest)
     changed = boolean(raw.changed),
     reload = text.field(raw.reload, 16),
     pending_restart = boolean(raw.pending_restart),
+  }
+end
+
+local function split_opts_and_digest(opts_or_digest, digest)
+  if digest == nil and type(opts_or_digest) == "string" then
+    return nil, opts_or_digest
+  end
+  if type(opts_or_digest) == "table" and next(opts_or_digest) ~= nil then
+    return opts_or_digest, digest
+  end
+  return nil, digest
+end
+
+-- `bitty.profiles.preview_create(name, opts?)`.
+function M.preview_create(host, name, opts)
+  local fn = profile_fn(host, "preview_create")
+  if fn == nil then
+    return nil, M.error(M.CODE_UNAVAILABLE, "host has no profiles.preview_create surface")
+  end
+  local raw, err
+  if type(opts) == "table" and next(opts) ~= nil then
+    raw, err = invoke(fn, name, opts)
+  else
+    raw, err = invoke(fn, name)
+  end
+  if raw == nil then
+    return nil, err
+  end
+  return preview_result(raw, "profiles.preview_create")
+end
+
+-- `bitty.profiles.create(name, opts_or_digest, digest?)`.
+function M.create(host, name, opts_or_digest, digest)
+  local fn = profile_fn(host, "create")
+  if fn == nil then
+    return nil, M.error(M.CODE_UNAVAILABLE, "host has no profiles.create surface")
+  end
+  local opts, token = split_opts_and_digest(opts_or_digest, digest)
+  local raw, err
+  if opts ~= nil then
+    raw, err = invoke(fn, name, opts, token)
+  else
+    raw, err = invoke(fn, name, token)
+  end
+  if raw == nil then
+    return nil, err
+  end
+  local extends = type(raw.extends) == "string" and text.field(raw.extends, M.MAX_NAME_BYTES) or nil
+  local preset = type(raw.preset) == "string" and text.field(raw.preset, M.MAX_NAME_BYTES) or nil
+  return {
+    name = text.field(raw.name ~= nil and raw.name or name, M.MAX_NAME_BYTES),
+    created = raw.created == nil and true or boolean(raw.created),
+    changed = raw.changed == nil and true or boolean(raw.changed),
+    replaced = boolean(raw.replaced),
+    backed_up = boolean(raw.backed_up),
+    extends = extends ~= "" and extends or nil,
+    preset = preset ~= "" and preset or nil,
+    reload = text.field(raw.reload, 16),
+  }
+end
+
+-- `bitty.profiles.preview_clone(src, dst, opts?)`.
+function M.preview_clone(host, src, dst, opts)
+  local fn = profile_fn(host, "preview_clone")
+  if fn == nil then
+    return nil, M.error(M.CODE_UNAVAILABLE, "host has no profiles.preview_clone surface")
+  end
+  local raw, err
+  if type(opts) == "table" and next(opts) ~= nil then
+    raw, err = invoke(fn, src, dst, opts)
+  else
+    raw, err = invoke(fn, src, dst)
+  end
+  if raw == nil then
+    return nil, err
+  end
+  return preview_result(raw, "profiles.preview_clone")
+end
+
+-- `bitty.profiles.clone(src, dst, opts_or_digest, digest?)`.
+function M.clone(host, src, dst, opts_or_digest, digest)
+  local fn = profile_fn(host, "clone")
+  if fn == nil then
+    return nil, M.error(M.CODE_UNAVAILABLE, "host has no profiles.clone surface")
+  end
+  local opts, token = split_opts_and_digest(opts_or_digest, digest)
+  local raw, err
+  if opts ~= nil then
+    raw, err = invoke(fn, src, dst, opts, token)
+  else
+    raw, err = invoke(fn, src, dst, token)
+  end
+  if raw == nil then
+    return nil, err
+  end
+  local target_name = raw.name ~= nil and raw.name or (raw.target ~= nil and raw.target or dst)
+  local extends = type(raw.extends) == "string" and text.field(raw.extends, M.MAX_NAME_BYTES) or nil
+  return {
+    source = text.field(raw.source ~= nil and raw.source or src, M.MAX_NAME_BYTES),
+    name = text.field(target_name, M.MAX_NAME_BYTES),
+    target = text.field(raw.target ~= nil and raw.target or target_name, M.MAX_NAME_BYTES),
+    cloned = raw.cloned == nil and true or boolean(raw.cloned),
+    changed = raw.changed == nil and true or boolean(raw.changed),
+    replaced = boolean(raw.replaced),
+    backed_up = boolean(raw.backed_up),
+    extends = extends ~= "" and extends or nil,
+    reload = text.field(raw.reload, 16),
+  }
+end
+
+-- `bitty.profiles.preview_rename(old_name, new_name, opts?)`.
+function M.preview_rename(host, old_name, new_name, opts)
+  local fn = profile_fn(host, "preview_rename")
+  if fn == nil then
+    return nil, M.error(M.CODE_UNAVAILABLE, "host has no profiles.preview_rename surface")
+  end
+  local raw, err
+  if type(opts) == "table" and next(opts) ~= nil then
+    raw, err = invoke(fn, old_name, new_name, opts)
+  else
+    raw, err = invoke(fn, old_name, new_name)
+  end
+  if raw == nil then
+    return nil, err
+  end
+  return preview_result(raw, "profiles.preview_rename")
+end
+
+-- `bitty.profiles.rename(old_name, new_name, opts_or_digest, digest?)`.
+function M.rename(host, old_name, new_name, opts_or_digest, digest)
+  local fn = profile_fn(host, "rename")
+  if fn == nil then
+    return nil, M.error(M.CODE_UNAVAILABLE, "host has no profiles.rename surface")
+  end
+  local opts, token = split_opts_and_digest(opts_or_digest, digest)
+  local raw, err
+  if opts ~= nil then
+    raw, err = invoke(fn, old_name, new_name, opts, token)
+  else
+    raw, err = invoke(fn, old_name, new_name, token)
+  end
+  if raw == nil then
+    return nil, err
+  end
+  local resolved_new = raw.new_name ~= nil and raw.new_name or (raw.name ~= nil and raw.name or new_name)
+  return {
+    old_name = text.field(raw.old_name ~= nil and raw.old_name or old_name, M.MAX_NAME_BYTES),
+    new_name = text.field(resolved_new, M.MAX_NAME_BYTES),
+    name = text.field(raw.name ~= nil and raw.name or resolved_new, M.MAX_NAME_BYTES),
+    renamed = raw.renamed == nil and true or boolean(raw.renamed),
+    changed = raw.changed == nil and true or boolean(raw.changed),
+    replaced = boolean(raw.replaced),
+    backed_up = boolean(raw.backed_up),
+    selector_updated = boolean(raw.selector_updated),
+    reload = text.field(raw.reload, 16),
+  }
+end
+
+-- `bitty.profiles.preview_delete(name, opts?)`.
+function M.preview_delete(host, name, opts)
+  local fn = profile_fn(host, "preview_delete")
+  if fn == nil then
+    return nil, M.error(M.CODE_UNAVAILABLE, "host has no profiles.preview_delete surface")
+  end
+  local raw, err
+  if type(opts) == "table" and next(opts) ~= nil then
+    raw, err = invoke(fn, name, opts)
+  else
+    raw, err = invoke(fn, name)
+  end
+  if raw == nil then
+    return nil, err
+  end
+  return preview_result(raw, "profiles.preview_delete")
+end
+
+-- `bitty.profiles.delete(name, opts_or_digest, digest?)`.
+function M.delete(host, name, opts_or_digest, digest)
+  local fn = profile_fn(host, "delete")
+  if fn == nil then
+    return nil, M.error(M.CODE_UNAVAILABLE, "host has no profiles.delete surface")
+  end
+  local opts, token = split_opts_and_digest(opts_or_digest, digest)
+  local raw, err
+  if opts ~= nil then
+    raw, err = invoke(fn, name, opts, token)
+  else
+    raw, err = invoke(fn, name, token)
+  end
+  if raw == nil then
+    return nil, err
+  end
+  return {
+    name = text.field(raw.name ~= nil and raw.name or name, M.MAX_NAME_BYTES),
+    deleted = raw.deleted == nil and true or boolean(raw.deleted),
+    changed = raw.changed == nil and true or boolean(raw.changed),
+    backed_up = boolean(raw.backed_up),
+    was_active = boolean(raw.was_active),
+    reload = text.field(raw.reload, 16),
   }
 end
 

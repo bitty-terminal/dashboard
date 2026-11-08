@@ -168,6 +168,7 @@ function MockHost.new(options)
   self.stale_once = options.stale_once == true
   self.config_error = options.config_error
   self.pending_restart = options.pending_restart == true
+  self.profile_lifecycle_enabled = options.profile_lifecycle ~= false
   self.bitty = self:build()
   return self
 end
@@ -251,7 +252,14 @@ function MockHost:consume(digest, target)
   if stored == nil then
     fail("runtime", "E_CONFIG_APPROVAL_REQUIRED", "no fresh preview token for this change")
   end
-  if stored.kind ~= target.kind or stored.key ~= target.key or stored.value ~= target.value then
+  if
+    stored.kind ~= target.kind
+    or stored.key ~= target.key
+    or stored.value ~= target.value
+    or stored.force ~= target.force
+    or stored.from ~= target.from
+    or stored.preset ~= target.preset
+  then
     fail("runtime", "E_CONFIG_APPROVAL_MISMATCH", "approval does not match this exact change")
   end
   self.approvals[digest] = nil
@@ -408,6 +416,25 @@ function MockHost:build_plugins()
   }
 end
 
+function MockHost:find_profile(name)
+  for index = 1, #self.profile_rows do
+    if self.profile_rows[index].name == name then
+      return self.profile_rows[index], index
+    end
+  end
+  return nil, nil
+end
+
+local function normalize_opts_and_digest(opts_or_digest, digest)
+  if type(opts_or_digest) == "string" and digest == nil then
+    return {}, opts_or_digest
+  end
+  if type(opts_or_digest) == "table" then
+    return opts_or_digest, digest
+  end
+  return {}, digest
+end
+
 function MockHost:build_profiles()
   local self = self
   local profiles = {}
@@ -420,19 +447,20 @@ function MockHost:build_profiles()
     for index = 1, #self.profile_rows do
       rows[index] = { name = self.profile_rows[index].name, active = self.profile_rows[index].active }
     end
-    return { rows = rows, active = self:active_profile(), count = #rows, truncated = false }
+    return {
+      rows = rows,
+      profiles = rows,
+      active = self:active_profile(),
+      count = #rows,
+      truncated = false,
+    }
   end
 
   profiles.preview_use = function(name)
     self:require("config.manage")
     self:record("profiles.preview_use", name)
     self:config_fail()
-    local found = false
-    for index = 1, #self.profile_rows do
-      if self.profile_rows[index].name == name then
-        found = true
-      end
-    end
+    local found = self:find_profile(name) ~= nil
     if not found then
       fail("validation", "E_CONFIG_INVALID", "profile name is invalid")
     end
@@ -461,6 +489,254 @@ function MockHost:build_profiles()
       reload = "auto",
       pending_restart = self.pending_restart,
     }
+  end
+
+  if self.profile_lifecycle_enabled then
+    profiles.preview_create = function(name, opts)
+      self:require("config.manage")
+      self:record("profiles.preview_create", name, opts)
+      self:config_fail()
+      if type(name) ~= "string" or name == "" then
+        fail("validation", "E_CONFIG_INVALID", "profile name is invalid")
+      end
+      opts = type(opts) == "table" and opts or {}
+      local existing = self:find_profile(name)
+      if existing ~= nil and opts.force ~= true then
+        fail("validation", "E_PROFILE_CONFLICT", "profile already exists")
+      end
+      local digest = self:issue({
+        kind = "profile_create",
+        key = name,
+        value = name,
+        force = opts.force == true,
+        from = opts.from,
+        preset = opts.preset,
+      })
+      return {
+        digest = digest,
+        rendered = "+profile." .. name .. " = {}",
+        changed_keys = { "profiles." .. name },
+        changed = true,
+        replaces_existing = existing ~= nil,
+        selector_updated = false,
+        active = existing ~= nil and existing.active == true or false,
+      }
+    end
+
+    profiles.create = function(name, opts_or_digest, digest)
+      self:require("config.manage")
+      local opts, token = normalize_opts_and_digest(opts_or_digest, digest)
+      self:record("profiles.create", name, opts_or_digest, digest)
+      self:config_fail()
+      self:consume(token, {
+        kind = "profile_create",
+        key = name,
+        value = name,
+        force = opts.force == true,
+        from = opts.from,
+        preset = opts.preset,
+      })
+      if self.stale_once then
+        self.stale_once = false
+        fail("runtime", "E_CONFIG_STALE", "the profile candidate changed since it was previewed")
+      end
+      local existing = self:find_profile(name)
+      if existing == nil then
+        self.profile_rows[#self.profile_rows + 1] = { name = name, active = false }
+      end
+      return {
+        name = name,
+        created = true,
+        changed = true,
+        replaced = existing ~= nil,
+        backed_up = existing ~= nil,
+        extends = opts.from,
+        preset = opts.preset or "minimal",
+        reload = "none",
+      }
+    end
+
+    profiles.preview_clone = function(src, dst, opts)
+      self:require("config.manage")
+      self:record("profiles.preview_clone", src, dst, opts)
+      self:config_fail()
+      if self:find_profile(src) == nil then
+        fail("validation", "E_PROFILE_NOT_FOUND", "source profile does not exist")
+      end
+      if type(dst) ~= "string" or dst == "" or src == dst then
+        fail("validation", "E_CONFIG_INVALID", "destination profile name is invalid")
+      end
+      opts = type(opts) == "table" and opts or {}
+      local existing = self:find_profile(dst)
+      if existing ~= nil and opts.force ~= true then
+        fail("validation", "E_PROFILE_CONFLICT", "destination profile already exists")
+      end
+      local digest = self:issue({
+        kind = "profile_clone",
+        key = src,
+        value = dst,
+        force = opts.force == true,
+      })
+      return {
+        digest = digest,
+        rendered = "+profile." .. dst .. " = clone(" .. src .. ")",
+        changed_keys = { "profiles." .. dst },
+        changed = true,
+        replaces_existing = existing ~= nil,
+        selector_updated = false,
+        active = existing ~= nil and existing.active == true or false,
+      }
+    end
+
+    profiles.clone = function(src, dst, opts_or_digest, digest)
+      self:require("config.manage")
+      local opts, token = normalize_opts_and_digest(opts_or_digest, digest)
+      self:record("profiles.clone", src, dst, opts_or_digest, digest)
+      self:config_fail()
+      self:consume(token, {
+        kind = "profile_clone",
+        key = src,
+        value = dst,
+        force = opts.force == true,
+      })
+      local existing = self:find_profile(dst)
+      if existing == nil then
+        self.profile_rows[#self.profile_rows + 1] = { name = dst, active = false }
+      end
+      return {
+        source = src,
+        name = dst,
+        target = dst,
+        cloned = true,
+        changed = true,
+        replaced = existing ~= nil,
+        backed_up = existing ~= nil,
+        extends = nil,
+        reload = "none",
+      }
+    end
+
+    profiles.preview_rename = function(old_name, new_name, opts)
+      self:require("config.manage")
+      self:record("profiles.preview_rename", old_name, new_name, opts)
+      self:config_fail()
+      local source_row = self:find_profile(old_name)
+      if source_row == nil then
+        fail("validation", "E_PROFILE_NOT_FOUND", "source profile does not exist")
+      end
+      if type(new_name) ~= "string" or new_name == "" or old_name == new_name then
+        fail("validation", "E_CONFIG_INVALID", "new profile name is invalid")
+      end
+      opts = type(opts) == "table" and opts or {}
+      local existing = self:find_profile(new_name)
+      if existing ~= nil and opts.force ~= true then
+        fail("validation", "E_PROFILE_CONFLICT", "destination profile already exists")
+      end
+      local digest = self:issue({
+        kind = "profile_rename",
+        key = old_name,
+        value = new_name,
+        force = opts.force == true,
+      })
+      return {
+        digest = digest,
+        rendered = "-profile." .. old_name .. "\n+profile." .. new_name,
+        changed_keys = { "profiles." .. old_name, "profiles." .. new_name },
+        changed = true,
+        replaces_existing = existing ~= nil,
+        selector_updated = source_row.active == true,
+        active = source_row.active == true,
+      }
+    end
+
+    profiles.rename = function(old_name, new_name, opts_or_digest, digest)
+      self:require("config.manage")
+      local opts, token = normalize_opts_and_digest(opts_or_digest, digest)
+      self:record("profiles.rename", old_name, new_name, opts_or_digest, digest)
+      self:config_fail()
+      self:consume(token, {
+        kind = "profile_rename",
+        key = old_name,
+        value = new_name,
+        force = opts.force == true,
+      })
+      local source_row = self:find_profile(old_name)
+      local existing, existing_index = self:find_profile(new_name)
+      local was_active = source_row ~= nil and source_row.active == true
+      if existing ~= nil and existing_index ~= nil then
+        table.remove(self.profile_rows, existing_index)
+      end
+      local target_row = self:find_profile(old_name)
+      if target_row ~= nil then
+        target_row.name = new_name
+      end
+      return {
+        old_name = old_name,
+        new_name = new_name,
+        name = new_name,
+        renamed = true,
+        changed = true,
+        replaced = existing ~= nil,
+        backed_up = existing ~= nil,
+        selector_updated = was_active,
+        reload = was_active and "auto" or "none",
+      }
+    end
+
+    profiles.preview_delete = function(name, opts)
+      self:require("config.manage")
+      self:record("profiles.preview_delete", name, opts)
+      self:config_fail()
+      local row = self:find_profile(name)
+      if row == nil then
+        fail("validation", "E_PROFILE_NOT_FOUND", "profile does not exist")
+      end
+      opts = type(opts) == "table" and opts or {}
+      if row.active and opts.force ~= true then
+        fail("validation", "E_PROFILE_CONFLICT", "active profile cannot be deleted without force")
+      end
+      local digest = self:issue({
+        kind = "profile_delete",
+        key = name,
+        value = name,
+        force = opts.force == true,
+      })
+      return {
+        digest = digest,
+        rendered = "-profile." .. name,
+        changed_keys = { "profiles." .. name },
+        changed = true,
+        replaces_existing = false,
+        selector_updated = false,
+        active = row.active == true,
+      }
+    end
+
+    profiles.delete = function(name, opts_or_digest, digest)
+      self:require("config.manage")
+      local opts, token = normalize_opts_and_digest(opts_or_digest, digest)
+      self:record("profiles.delete", name, opts_or_digest, digest)
+      self:config_fail()
+      self:consume(token, {
+        kind = "profile_delete",
+        key = name,
+        value = name,
+        force = opts.force == true,
+      })
+      local row, index = self:find_profile(name)
+      local was_active = row ~= nil and row.active == true
+      if index ~= nil then
+        table.remove(self.profile_rows, index)
+      end
+      return {
+        name = name,
+        deleted = true,
+        changed = true,
+        backed_up = true,
+        was_active = was_active,
+        reload = "none",
+      }
+    end
   end
 
   return profiles
@@ -625,6 +901,7 @@ function MockHost:build()
     bitty.config = self:build_config()
     bitty.plugins = self:build_plugins()
     bitty.profiles = self:build_profiles()
+    bitty.config.profiles = bitty.profiles
   end
 
   return bitty

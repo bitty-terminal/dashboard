@@ -241,4 +241,113 @@ function M.enum_and_kind_metadata_is_local()
   end
 end
 
+function M.profile_lifecycle_adapters_and_config_profiles_fallback()
+  local host = fake_host()
+  local lifecycle_surface = {
+    list = function()
+      return {
+        profiles = { { name = "work", active = true } },
+        active = "work",
+        truncated = false,
+      }
+    end,
+    preview_use = function(name)
+      return { digest = digest("1"), rendered = "+profile = " .. name, keys = { "profile" }, changed = true }
+    end,
+    use = function(name)
+      return { active = name, changed = true, reload = "auto", pending_restart = false }
+    end,
+    preview_create = function(name, opts)
+      return {
+        digest = digest("2"),
+        rendered = "+profile." .. name,
+        changed_keys = { "profiles." .. name },
+        changed = true,
+        replaces_existing = opts ~= nil and opts.force == true,
+      }
+    end,
+    create = function(name, opts_or_digest, explicit_digest)
+      local from = type(opts_or_digest) == "table" and opts_or_digest.from or nil
+      if explicit_digest == nil and type(opts_or_digest) ~= "string" then
+        error("missing digest on create")
+      end
+      return { name = name, created = true, changed = true, extends = from, reload = "none" }
+    end,
+    preview_clone = function(src, dst)
+      return {
+        digest = digest("3"),
+        rendered = "+" .. dst .. " <- " .. src,
+        changed_keys = { "profiles." .. dst },
+        changed = true,
+      }
+    end,
+    clone = function(src, dst)
+      return { source = src, name = dst, target = dst, cloned = true, changed = true, reload = "none" }
+    end,
+    preview_rename = function(old_name, new_name)
+      return {
+        digest = digest("4"),
+        rendered = "-" .. old_name .. "\n+" .. new_name,
+        changed_keys = { "profiles." .. old_name, "profiles." .. new_name },
+        changed = true,
+        selector_updated = true,
+      }
+    end,
+    rename = function(old_name, new_name)
+      return {
+        old_name = old_name,
+        new_name = new_name,
+        name = new_name,
+        renamed = true,
+        changed = true,
+        selector_updated = true,
+        reload = "auto",
+      }
+    end,
+    preview_delete = function(name)
+      return {
+        digest = digest("5"),
+        rendered = "-" .. name,
+        changed_keys = { "profiles." .. name },
+        changed = true,
+      }
+    end,
+    delete = function(name)
+      return { name = name, deleted = true, changed = true, backed_up = true, was_active = false, reload = "none" }
+    end,
+  }
+  -- Mount only on `host.config.profiles` to verify the proxy fallback.
+  host.config.profiles = lifecycle_surface
+  if not config.switchable(host) or not config.profile_lifecycle(host) then
+    error("config.profiles proxy must satisfy switchable and profile_lifecycle")
+  end
+  local listed = config.profiles(host)
+  if listed == nil or #listed.rows ~= 1 or listed.rows[1].name ~= "work" or not listed.lifecycle then
+    error("profiles() must accept raw.profiles and report lifecycle = true")
+  end
+  local created_preview = config.preview_create(host, "dev", { from = "work", force = true })
+  if created_preview == nil or created_preview.keys[1] ~= "profiles.dev" or not created_preview.replaces_existing then
+    error("preview_create did not normalize changed_keys/replaces_existing")
+  end
+  local created = config.create(host, "dev", { from = "work" }, created_preview.digest)
+  if created == nil or created.name ~= "dev" or created.extends ~= "work" then
+    error("create with opts failed")
+  end
+  local cloned_preview = config.preview_clone(host, "work", "work-copy")
+  local cloned = config.clone(host, "work", "work-copy", cloned_preview.digest)
+  if cloned == nil or cloned.name ~= "work-copy" or cloned.source ~= "work" then
+    error("clone failed")
+  end
+  local renamed_preview = config.preview_rename(host, "work-copy", "work-2")
+  local renamed = config.rename(host, "work-copy", "work-2", renamed_preview.digest)
+  if renamed == nil or renamed.new_name ~= "work-2" or not renamed.selector_updated then
+    error("rename failed")
+  end
+  local deleted_preview = config.preview_delete(host, "work-2")
+  local deleted = config.delete(host, "work-2", deleted_preview.digest)
+  if deleted == nil or not deleted.deleted or not deleted.backed_up then
+    error("delete failed")
+  end
+end
+
 return M
