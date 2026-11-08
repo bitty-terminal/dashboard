@@ -152,6 +152,46 @@ function M.confirm_rows_name_plugin_and_profile_intents()
   if edit.confirm_rows(profile)[1] ~= "Switch profile to work" then
     error("the profile intent is wrong")
   end
+  local create_state = edit.start_confirm(edit.new(), {
+    target = edit.TARGET_PROFILE_CREATE,
+    subject = "dev",
+    kind = "text",
+    value = "dev",
+    preview = { digest = string.rep("c", 64), lines = {}, keys = {} },
+  })
+  if edit.confirm_rows(create_state)[1] ~= "Create profile dev" then
+    error("the profile create intent is wrong")
+  end
+  local clone_state = edit.start_confirm(edit.new(), {
+    target = edit.TARGET_PROFILE_CLONE,
+    subject = "work",
+    kind = "text",
+    value = "work-copy",
+    preview = { digest = string.rep("c", 64), lines = {}, keys = {} },
+  })
+  if edit.confirm_rows(clone_state)[1] ~= "Clone profile work to work-copy" then
+    error("the profile clone intent is wrong")
+  end
+  local rename_state = edit.start_confirm(edit.new(), {
+    target = edit.TARGET_PROFILE_RENAME,
+    subject = "work",
+    kind = "text",
+    value = "focused",
+    preview = { digest = string.rep("c", 64), lines = {}, keys = {} },
+  })
+  if edit.confirm_rows(rename_state)[1] ~= "Rename profile work to focused" then
+    error("the profile rename intent is wrong")
+  end
+  local delete_state = edit.start_confirm(edit.new(), {
+    target = edit.TARGET_PROFILE_DELETE,
+    subject = "default",
+    kind = "text",
+    value = nil,
+    preview = { digest = string.rep("c", 64), lines = {}, keys = {} },
+  })
+  if edit.confirm_rows(delete_state)[1] ~= "Delete profile default" then
+    error("the profile delete intent is wrong")
+  end
 end
 
 function M.notice_and_cancel_return_to_browse()

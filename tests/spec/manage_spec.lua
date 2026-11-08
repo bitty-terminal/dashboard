@@ -488,4 +488,154 @@ function M.an_older_host_keeps_the_original_read_only_rendering()
   end
 end
 
+function M.profile_create_clone_rename_and_delete_flow()
+  local host, plugin = load()
+  host:run("toggle_dashboard")
+  press(host, "5")
+
+  -- 1. Create a new profile ("n" -> type "dev" -> Enter to preview -> Enter to create).
+  press(host, "n")
+  if plugin.status().mode ~= "input" then
+    error("n on Profiles must open the create input")
+  end
+  for index = 1, #"dev" do
+    press(host, ("dev"):sub(index, index))
+  end
+  press(host, "key:Enter")
+  local create_preview = host:last_call("profiles.preview_create")
+  if create_preview == nil or create_preview.args[1] ~= "dev" then
+    error("create did not call profiles.preview_create")
+  end
+  if plugin.status().mode ~= "confirm" then
+    error("create preview must enter confirm mode")
+  end
+  if not contains(lines(host:component()), "Create profile dev") then
+    error("confirm view did not show Create profile dev")
+  end
+  press(host, "key:Enter")
+  local created = host:last_call("profiles.create")
+  if created == nil or created.args[1] ~= "dev" or created.args[2] ~= host:last_issued().digest then
+    error("create did not pass the preview digest to profiles.create")
+  end
+  if host:find_profile("dev") == nil then
+    error("dev profile was not added to host")
+  end
+  if not contains(plugin.status().notice or "", "created profile dev") then
+    error("create notice missing: " .. tostring(plugin.status().notice))
+  end
+
+  -- 2. Clone the selected "dev" profile ("c" -> seeded "dev-copy" -> Enter -> Enter).
+  press(host, "c")
+  if plugin.status().mode ~= "input" then
+    error("c on Profiles must open the clone input")
+  end
+  if not contains(lines(host:component()), "clone dev as = dev-copy") then
+    error("clone input was not seeded with dev-copy")
+  end
+  press(host, "key:Enter")
+  local clone_preview = host:last_call("profiles.preview_clone")
+  if clone_preview == nil or clone_preview.args[1] ~= "dev" or clone_preview.args[2] ~= "dev-copy" then
+    error("clone did not call profiles.preview_clone(dev, dev-copy)")
+  end
+  if plugin.status().mode ~= "confirm" then
+    error("clone preview must enter confirm mode")
+  end
+  press(host, "key:Enter")
+  local cloned = host:last_call("profiles.clone")
+  if
+    cloned == nil
+    or cloned.args[1] ~= "dev"
+    or cloned.args[2] ~= "dev-copy"
+    or cloned.args[3] ~= host:last_issued().digest
+  then
+    error("clone did not pass the preview digest to profiles.clone")
+  end
+  if host:find_profile("dev-copy") == nil then
+    error("dev-copy profile was not added to host")
+  end
+
+  -- 3. Rename "dev-copy" to "staging" ("e" -> replace seed -> Enter -> Enter).
+  press(host, "e")
+  if plugin.status().mode ~= "input" then
+    error("e on Profiles must open the rename input")
+  end
+  for _ = 1, #"dev-copy" do
+    press(host, "key:Backspace")
+  end
+  for index = 1, #"staging" do
+    press(host, ("staging"):sub(index, index))
+  end
+  press(host, "key:Enter")
+  local rename_preview = host:last_call("profiles.preview_rename")
+  if rename_preview == nil or rename_preview.args[1] ~= "dev-copy" or rename_preview.args[2] ~= "staging" then
+    error("rename did not call profiles.preview_rename(dev-copy, staging)")
+  end
+  press(host, "key:Enter")
+  local renamed = host:last_call("profiles.rename")
+  if
+    renamed == nil
+    or renamed.args[1] ~= "dev-copy"
+    or renamed.args[2] ~= "staging"
+    or renamed.args[3] ~= host:last_issued().digest
+  then
+    error("rename did not pass the preview digest to profiles.rename")
+  end
+  if host:find_profile("staging") == nil or host:find_profile("dev-copy") ~= nil then
+    error("rename did not update host profile rows")
+  end
+
+  -- 4. Delete "staging" ("d" -> preview -> Enter to delete).
+  press(host, "d")
+  local delete_preview = host:last_call("profiles.preview_delete")
+  if delete_preview == nil or delete_preview.args[1] ~= "staging" then
+    error("d did not call profiles.preview_delete(staging)")
+  end
+  if plugin.status().mode ~= "confirm" then
+    error("d must enter confirm mode")
+  end
+  if not contains(lines(host:component()), "Delete profile staging") then
+    error("confirm view did not show Delete profile staging")
+  end
+  press(host, "key:Enter")
+  local deleted = host:last_call("profiles.delete")
+  if deleted == nil or deleted.args[1] ~= "staging" or deleted.args[2] ~= host:last_issued().digest then
+    error("delete did not pass the preview digest to profiles.delete")
+  end
+  if host:find_profile("staging") ~= nil then
+    error("staging profile was not removed from host")
+  end
+  if not contains(plugin.status().notice or "", "deleted profile staging") then
+    error("delete notice missing: " .. tostring(plugin.status().notice))
+  end
+end
+
+function M.profile_lifecycle_gracefully_degrades_on_switch_only_host()
+  local host, plugin = load({ profile_lifecycle = false })
+  host:run("toggle_dashboard")
+  press(host, "5")
+
+  -- A host with `profiles.list`/`preview_use`/`use` but without `preview_create`
+  -- keeps the Profiles tab editable for switching and reports a non-blocking
+  -- notice when lifecycle keys are pressed.
+  for _, key_text in ipairs({ "n", "c", "e", "d" }) do
+    press(host, key_text)
+    if not plugin.status().manage or plugin.status().blocked then
+      error("missing lifecycle verbs must not block config.manage")
+    end
+    if not contains(plugin.status().notice or "", "unavailable on this host") then
+      error("missing lifecycle verb must report graceful fallback notice for " .. key_text)
+    end
+  end
+
+  -- Switching active profile with Enter still works cleanly.
+  press(host, "key:Enter")
+  if plugin.status().mode ~= "confirm" then
+    error("Enter must still preview profile switch on a switch-only host")
+  end
+  press(host, "key:Enter")
+  if host:active_profile() ~= "default" then
+    error("Enter must still apply profile switch on a switch-only host")
+  end
+end
+
 return M
