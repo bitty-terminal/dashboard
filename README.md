@@ -37,6 +37,13 @@ Each section either renders bounded rows or an explicit
 `unavailable: <reason>` marker. A failed source is never rendered as "none
 installed"; an empty source renders its own empty state instead.
 
+Open it with `bitty-terminal.dashboard:toggle_dashboard`; the plugin installs
+no default chord. For example, bind the command to `alt+g` as shown under
+[Keybindings](#keybindings) and press it: the panel opens on the Overview
+section, `l`/`Tab` and `h`/`Shift+Tab` move between sections, `j`/`k` move
+between rows, and `Esc` closes the panel. `Enter` on a setting starts a
+previewed edit; a second `Enter` applies it.
+
 ## Install
 
 Prerequisites: Bitty `>=0.0.31` and Plugin API `^1.0`. The 0.0.31 floor is the
@@ -68,9 +75,9 @@ carries a `disabled_reason`; see [Troubleshooting](#troubleshooting).
 
 ## Commands
 
-| Command                                     | What it does                                                     | Arguments                                                 |
-| ------------------------------------------- | ---------------------------------------------------------------- | --------------------------------------------------------- |
-| `bitty-terminal.dashboard:toggle_dashboard` | Open the panel when closed; close and release capture when open. | `width` (integer, optional), `height` (integer, optional) |
+| Command                                     | What it does                                                     | Arguments                                                                 |
+| ------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `bitty-terminal.dashboard:toggle_dashboard` | Open the panel when closed; close and release capture when open. | `width` (integer, optional, 40–240), `height` (integer, optional, 12–100) |
 
 No default keybinding is installed. `width` and `height` are presentation
 hints: the Plugin API v1 has no viewport-size surface, so they bound row
