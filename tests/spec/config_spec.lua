@@ -350,4 +350,21 @@ function M.profile_lifecycle_adapters_and_config_profiles_fallback()
   end
 end
 
+function M.diff_lines_slices_utf8_boundary_at_max_rendered_bytes()
+  -- 15 lines of 270 bytes ("a" * 269 + "\n" = 270 * 15 = 4050 bytes),
+  -- then line 16 has 44 ASCII bytes + "中" (bytes 4095..4097).
+  -- Raw byte slice at 4096 would leave 2 orphan bytes of "中" on line 16 (<= 96 bytes),
+  -- producing invalid UTF-8. text.slice_bytes backs off to byte 4094 (valid UTF-8).
+  local fifteen = string.rep(string.rep("a", 269) .. "\n", 15)
+  local straddling = fifteen .. string.rep("b", 44) .. "中"
+  local straddling_lines = config.diff_lines(straddling)
+  local last_line = straddling_lines[16]
+  if last_line ~= string.rep("b", 44) then
+    error("diff_lines must slice MAX_RENDERED_BYTES on a UTF-8 boundary, got: " .. tostring(last_line))
+  end
+  if utf8 and utf8.len and utf8.len(last_line) == nil then
+    error("diff_lines produced invalid UTF-8 on trailing line")
+  end
+end
+
 return M

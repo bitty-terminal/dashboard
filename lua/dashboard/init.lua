@@ -1290,47 +1290,51 @@ if bitty == nil or type(bitty) ~= "table" then
   return M
 end
 
-bitty.commands.register({
-  id = "toggle_dashboard",
-  title = "Dashboard: toggle",
-  description = "Open or close the configuration and status dashboard.",
-  args_schema = {
-    type = "object",
-    properties = {
-      width = { type = "integer", minimum = text.MIN_WIDTH, maximum = text.MAX_WIDTH },
-      height = { type = "integer", minimum = text.MIN_HEIGHT, maximum = text.MAX_HEIGHT },
+if type(bitty.commands) == "table" and type(bitty.commands.register) == "function" then
+  bitty.commands.register({
+    id = "toggle_dashboard",
+    title = "Dashboard: toggle",
+    description = "Open or close the configuration and status dashboard.",
+    args_schema = {
+      type = "object",
+      properties = {
+        width = { type = "integer", minimum = text.MIN_WIDTH, maximum = text.MAX_WIDTH },
+        height = { type = "integer", minimum = text.MIN_HEIGHT, maximum = text.MAX_HEIGHT },
+      },
+      additionalProperties = false,
     },
-    additionalProperties = false,
-  },
-  result_schema = { type = "boolean" },
-  run = function(args)
-    return M.toggle(args)
-  end,
-})
+    result_schema = { type = "boolean" },
+    run = function(args)
+      return M.toggle(args)
+    end,
+  })
+end
 
--- The host nudges the capture owner when bytes are queued (bitty#1972), so
--- navigation never needs a Core-driven callback on the input hot path.
-bitty.events.subscribe("overlay.input.available", function(_event)
-  M.drain()
-end)
+if type(bitty.events) == "table" and type(bitty.events.subscribe) == "function" then
+  -- The host nudges the capture owner when bytes are queued (bitty#1972), so
+  -- navigation never needs a Core-driven callback on the input hot path.
+  bitty.events.subscribe("overlay.input.available", function(_event)
+    M.drain()
+  end)
 
--- Cold-path drain: a focus transition is where input is most likely to be
--- stranded, and it also refreshes the snapshot before the next paint.
-bitty.events.subscribe("focus.changed", function(_event)
-  M.drain()
-end)
+  -- Cold-path drain: a focus transition is where input is most likely to be
+  -- stranded, and it also refreshes the snapshot before the next paint.
+  bitty.events.subscribe("focus.changed", function(_event)
+    M.drain()
+  end)
 
--- The host ends a capture on timeout, focus switch, unload, or crash. The
--- surface is already gone; clear local state so the next toggle reopens.
-bitty.events.subscribe("overlay.released", function(event)
-  if not state.open then
-    return
-  end
-  local payload = type(event) == "table" and event.payload or nil
-  if type(payload) == "table" and type(payload.owner) == "string" and payload.owner ~= M.PLUGIN_ID then
-    return
-  end
-  reset()
-end)
+  -- The host ends a capture on timeout, focus switch, unload, or crash. The
+  -- surface is already gone; clear local state so the next toggle reopens.
+  bitty.events.subscribe("overlay.released", function(event)
+    if not state.open then
+      return
+    end
+    local payload = type(event) == "table" and event.payload or nil
+    if type(payload) == "table" and type(payload.owner) == "string" and payload.owner ~= M.PLUGIN_ID then
+      return
+    end
+    reset()
+  end)
+end
 
 return M

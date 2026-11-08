@@ -292,7 +292,7 @@ function M.diff_lines(rendered)
   if type(rendered) ~= "string" or rendered == "" then
     return lines
   end
-  local bounded = string.sub(rendered, 1, M.MAX_RENDERED_BYTES)
+  local bounded = text.slice_bytes(rendered, M.MAX_RENDERED_BYTES)
   local start = 1
   while #lines < M.MAX_DIFF_LINES and start <= #bounded do
     local newline = string.find(bounded, "\n", start, true)
