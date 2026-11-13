@@ -160,7 +160,7 @@ function M.narrow_layout_collapses_the_tab_strip()
   end
   local collapsed = false
   for _, line in ipairs(lines) do
-    if string.find(line, "1/6 Overview", 1, true) ~= nil then
+    if string.find(line, "1/7 Overview", 1, true) ~= nil then
       collapsed = true
     end
   end
@@ -249,7 +249,7 @@ function M.footer_reports_the_window()
   local component = render.scene(view, { width = 80, height = 24 })
   local lines = render.lines(component)
   local footer = lines[#lines]
-  if string.find(footer, "2/6 Plugins", 1, true) == nil then
+  if string.find(footer, "2/7 Plugins", 1, true) == nil then
     error("footer must name the active section: " .. footer)
   end
   if string.find(footer, "q close", 1, true) == nil then

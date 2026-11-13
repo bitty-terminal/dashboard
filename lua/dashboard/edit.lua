@@ -27,6 +27,10 @@ M.TARGET_PROFILE_CREATE = "profile_create"
 M.TARGET_PROFILE_CLONE = "profile_clone"
 M.TARGET_PROFILE_RENAME = "profile_rename"
 M.TARGET_PROFILE_DELETE = "profile_delete"
+M.TARGET_WHEEL_SETTING = "wheel_setting"
+M.TARGET_WHEEL_AUTH_SET = "wheel_auth_set"
+M.TARGET_WHEEL_AUTH_REMOVE = "wheel_auth_remove"
+M.TARGET_WHEEL_APPROVAL = "wheel_approval"
 
 M.MAX_INPUT_BYTES = 256
 M.MAX_NOTICE_BYTES = 96
@@ -63,7 +67,7 @@ function M.start_input(state, opts)
   next_state.subject = opts.subject
   next_state.kind = opts.kind
   next_state.opts = opts.opts
-  next_state.buffer = text.single_line(opts.seed or "")
+  next_state.buffer = opts.kind == "secret" and "" or text.single_line(opts.seed or "")
   next_state.prompt = opts.prompt
   next_state.digest = nil
   next_state.lines = nil
@@ -204,7 +208,7 @@ end
 
 -- Unquoted seed for the one-line input.
 function M.seed_value(value, kind)
-  if value == nil then
+  if value == nil or kind == "secret" then
     return ""
   end
   if kind == "bool" then
@@ -218,6 +222,9 @@ end
 
 -- Quoted display form for one typed value.
 function M.describe_value(value, kind)
+  if kind == "secret" then
+    return "***REDACTED***"
+  end
   if kind == "bool" or type(value) == "boolean" then
     return value == true and "true" or "false"
   end
@@ -227,9 +234,13 @@ function M.describe_value(value, kind)
   return '"' .. text.field(value, M.MAX_VALUE_BYTES) .. '"'
 end
 
--- The single input line: prompt plus buffer.
+-- The single input line: prompt plus buffer (masked for secret inputs).
 function M.input_row(state)
-  return (state.prompt or "") .. (state.buffer or "")
+  local buf = state.buffer or ""
+  if state.kind == "secret" then
+    buf = string.rep("*", text.columns(buf))
+  end
+  return (state.prompt or "") .. buf
 end
 
 -- Confirm-step rows: intent, changed keys, and the host's exact diff.
@@ -250,6 +261,14 @@ function M.confirm_rows(state)
     title = "Rename profile " .. tostring(state.subject) .. " to " .. tostring(state.value)
   elseif state.target == M.TARGET_PROFILE_DELETE then
     title = "Delete profile " .. tostring(state.subject)
+  elseif state.target == M.TARGET_WHEEL_SETTING then
+    title = "Apply wheel." .. tostring(state.subject) .. " = " .. M.describe_value(state.value, state.kind)
+  elseif state.target == M.TARGET_WHEEL_AUTH_SET then
+    title = "Set API key for " .. tostring(state.subject) .. " = ***REDACTED***"
+  elseif state.target == M.TARGET_WHEEL_AUTH_REMOVE then
+    title = "Clear stored API key for " .. tostring(state.subject)
+  elseif state.target == M.TARGET_WHEEL_APPROVAL then
+    title = "Resolve approval " .. tostring(state.subject) .. " -> " .. tostring(state.value)
   else
     title = "Apply change"
   end

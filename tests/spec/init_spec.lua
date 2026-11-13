@@ -154,7 +154,7 @@ function M.captured_keys_navigate_sections_and_rows()
     error("changing section must reset the offset")
   end
   local rendered = lines(host:component())
-  if string.find(rendered, "2/6 Plugins", 1, true) == nil then
+  if string.find(rendered, "2/7 Plugins", 1, true) == nil then
     error("the painted footer did not follow navigation")
   end
 end

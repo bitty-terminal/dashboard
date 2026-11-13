@@ -35,6 +35,21 @@ local function is_continuation(index_byte)
   return index_byte ~= nil and index_byte >= 128 and index_byte < 192
 end
 
+-- Count UTF-8 codepoints (display columns for ASCII + box-drawing glyphs)
+-- without requiring the `utf8` library.
+function M.columns(value)
+  if type(value) ~= "string" then
+    return 0
+  end
+  local count = 0
+  for index = 1, #value do
+    if not is_continuation(byte_at(value, index)) then
+      count = count + 1
+    end
+  end
+  return count
+end
+
 -- Slice at a UTF-8 boundary without requiring the `utf8` library: the plugin
 -- VM is a restricted Lua build, so the byte-level rule is the portable one.
 function M.slice_bytes(value, max_bytes)

@@ -249,7 +249,16 @@ function M.normalize(snapshot)
       extensions = failure,
       settings = failure,
       profiles = failure,
+      wheel = failure,
     }
+  end
+  local wheel_section
+  if type(snapshot.wheel) == "table" and snapshot.wheel.unavailable ~= nil then
+    wheel_section = { kind = M.KIND_UNAVAILABLE, reason = field(snapshot.wheel.unavailable) }
+  elseif snapshot.wheel == nil and type(snapshot.diagnostics) == "table" and snapshot.diagnostics.unavailable ~= nil then
+    wheel_section = { kind = M.KIND_UNAVAILABLE, reason = field(snapshot.diagnostics.unavailable) }
+  else
+    wheel_section = { kind = M.KIND_ROWS, rows = {}, truncated = false }
   end
   return {
     diagnostics = M.diagnostics(snapshot.diagnostics),
@@ -257,6 +266,7 @@ function M.normalize(snapshot)
     settings = rows_container(snapshot.settings, M.ROW_LIMITS.settings, normalize_setting_row),
     extensions = rows_container(snapshot.extensions, M.ROW_LIMITS.extensions, normalize_extension_row),
     profiles = rows_container(snapshot.profiles, M.ROW_LIMITS.profiles, normalize_profile_row),
+    wheel = wheel_section,
   }
 end
 

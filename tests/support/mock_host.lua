@@ -46,6 +46,46 @@ local DEFAULT_PROFILES = {
   { name = "work", active = true },
 }
 
+local DEFAULT_WHEEL_PROVIDERS = {
+  {
+    id = "opencode-go",
+    name = "opencode-go",
+    label = "OpenCode Go",
+    protocol = "openai",
+    default_model = "deepseek-v4.1-flash",
+    model = "deepseek-v4.1-flash",
+    model_source = "default",
+    auth_env = "OPENCODE_API_KEY",
+    auth_configured = true,
+    has_auth = true,
+    auth_source = "data_credentials",
+    base_url = "https://opencode.ai/inference/go/openai/v1",
+  },
+  {
+    id = "openrouter",
+    name = "openrouter",
+    label = "OpenRouter",
+    protocol = "openai",
+    default_model = "anthropic/claude-4.5-sonnet",
+    model = "anthropic/claude-4.5-sonnet",
+    model_source = "default",
+    auth_env = "OPENROUTER_API_KEY",
+    auth_configured = false,
+    has_auth = false,
+    auth_source = "none",
+    base_url = "https://openrouter.ai/api/v1",
+  },
+}
+
+local DEFAULT_WHEEL_PERMISSIONS = {
+  read_file = "auto",
+  write_file = "ask",
+  edit_file = "ask",
+  glob = "auto",
+  grep = "auto",
+  bash = "ask",
+}
+
 local function copy_settings(source)
   local out = {}
   for key, entry in pairs(source or {}) do
@@ -169,6 +209,22 @@ function MockHost.new(options)
   self.config_error = options.config_error
   self.pending_restart = options.pending_restart == true
   self.profile_lifecycle_enabled = options.profile_lifecycle ~= false
+  self.wheel_enabled = options.wheel ~= false
+  local wheel_perms = {}
+  for key, value in pairs(options.wheel_permissions or DEFAULT_WHEEL_PERMISSIONS) do
+    wheel_perms[key] = value
+  end
+  self.wheel_state = {
+    default_provider = options.wheel_default_provider or "opencode-go",
+    default_model = options.wheel_default_model or "deepseek-v4.1-flash",
+    thinking_enabled = options.wheel_thinking_enabled ~= false,
+    thinking_gear = options.wheel_thinking_gear or "high",
+    approval_mode = options.wheel_approval_mode or "prompt",
+    providers = copy_rows(options.wheel_providers or DEFAULT_WHEEL_PROVIDERS),
+    permissions = wheel_perms,
+    approvals = copy_rows(options.wheel_approvals or {}),
+    credentials = { ["opencode-go"] = "staged-secret" },
+  }
   self.bitty = self:build()
   return self
 end
@@ -742,6 +798,190 @@ function MockHost:build_profiles()
   return profiles
 end
 
+function MockHost:find_wheel_provider(id)
+  for index = 1, #self.wheel_state.providers do
+    local row = self.wheel_state.providers[index]
+    if row.id == id or row.name == id then
+      return row
+    end
+  end
+  return nil
+end
+
+function MockHost:find_wheel_approval(id)
+  for index = 1, #self.wheel_state.approvals do
+    if self.wheel_state.approvals[index].id == id then
+      return self.wheel_state.approvals[index]
+    end
+  end
+  return nil
+end
+
+function MockHost:build_wheel()
+  local self = self
+  local wheel = {}
+
+  wheel.get = function()
+    self:require("config.manage")
+    self:record("wheel.get")
+    self:config_fail()
+    local perms = {}
+    for key, value in pairs(self.wheel_state.permissions) do
+      perms[key] = value
+    end
+    return {
+      default_provider = self.wheel_state.default_provider,
+      default_model = self.wheel_state.default_model,
+      thinking_enabled = self.wheel_state.thinking_enabled,
+      thinking_gear = self.wheel_state.thinking_gear,
+      approval_mode = self.wheel_state.approval_mode,
+      providers = copy_rows(self.wheel_state.providers),
+      permissions = perms,
+      approvals = copy_rows(self.wheel_state.approvals),
+      truncated = false,
+    }
+  end
+
+  wheel.preview = function(key, value)
+    self:require("config.manage")
+    self:record("wheel.preview", key, value)
+    self:config_fail()
+    if type(key) ~= "string" or key == "" then
+      fail("validation", "E_CONFIG_KEY", "wheel setting key is invalid")
+    end
+    local digest = self:issue({ kind = "wheel_setting", key = key, value = value })
+    return {
+      digest = digest,
+      rendered = "-" .. key .. "\n+" .. key .. " = " .. tostring(value),
+      keys = { "wheel." .. key },
+      changed = true,
+    }
+  end
+
+  wheel.set = function(key, value, digest)
+    self:require("config.manage")
+    self:record("wheel.set", key, value, digest)
+    self:config_fail()
+    self:consume(digest, { kind = "wheel_setting", key = key, value = value })
+    if
+      key == "default_provider"
+      or key == "default_model"
+      or key == "thinking_enabled"
+      or key == "thinking_gear"
+      or key == "approval_mode"
+    then
+      self.wheel_state[key] = value
+    else
+      local provider_id = key:match("^providers%.(.+)%.model$")
+      local perm_key = key:match("^permissions%.(.+)$")
+      if provider_id ~= nil then
+        local row = self:find_wheel_provider(provider_id)
+        if row ~= nil then
+          row.model = value
+          row.model_source = "data_settings"
+        end
+      elseif perm_key ~= nil then
+        self.wheel_state.permissions[perm_key] = value
+      end
+    end
+    return { applied = true, changed = true, reload = "none" }
+  end
+
+  wheel.preview_auth_set = function(provider, api_key)
+    self:require("config.manage")
+    self:record("wheel.preview_auth_set", provider, api_key)
+    self:config_fail()
+    if self:find_wheel_provider(provider) == nil or type(api_key) ~= "string" or api_key == "" then
+      fail("validation", "E_CONFIG_INVALID", "invalid wheel provider or empty credential")
+    end
+    local digest = self:issue({ kind = "wheel_auth_set", key = provider, value = api_key })
+    return {
+      digest = digest,
+      rendered = '+credentials.' .. provider .. ' = "***REDACTED***"',
+      keys = { "wheel.credentials." .. provider },
+      changed = true,
+    }
+  end
+
+  wheel.auth_set = function(provider, api_key, digest)
+    self:require("config.manage")
+    self:record("wheel.auth_set", provider, api_key, digest)
+    self:config_fail()
+    self:consume(digest, { kind = "wheel_auth_set", key = provider, value = api_key })
+    local row = self:find_wheel_provider(provider)
+    if row ~= nil then
+      row.auth_configured = true
+      row.has_auth = true
+      row.auth_source = "data_credentials"
+    end
+    self.wheel_state.credentials[provider] = api_key
+    return { provider = provider, configured = true, changed = true, reload = "none" }
+  end
+
+  wheel.preview_auth_remove = function(provider)
+    self:require("config.manage")
+    self:record("wheel.preview_auth_remove", provider)
+    self:config_fail()
+    if self:find_wheel_provider(provider) == nil then
+      fail("validation", "E_CONFIG_INVALID", "invalid wheel provider")
+    end
+    local digest = self:issue({ kind = "wheel_auth_remove", key = provider, value = provider })
+    return {
+      digest = digest,
+      rendered = '-credentials.' .. provider .. ' = "***REDACTED***"',
+      keys = { "wheel.credentials." .. provider },
+      changed = true,
+    }
+  end
+
+  wheel.auth_remove = function(provider, digest)
+    self:require("config.manage")
+    self:record("wheel.auth_remove", provider, digest)
+    self:config_fail()
+    self:consume(digest, { kind = "wheel_auth_remove", key = provider, value = provider })
+    local row = self:find_wheel_provider(provider)
+    if row ~= nil then
+      row.auth_configured = false
+      row.has_auth = false
+      row.auth_source = "none"
+    end
+    self.wheel_state.credentials[provider] = nil
+    return { provider = provider, removed = true, changed = true, reload = "none" }
+  end
+
+  wheel.preview_resolve_approval = function(id, decision)
+    self:require("config.manage")
+    self:record("wheel.preview_resolve_approval", id, decision)
+    self:config_fail()
+    local apr = self:find_wheel_approval(id)
+    if apr == nil or apr.status ~= "pending" then
+      fail("validation", "E_CONFIG_INVALID", "pending approval not found")
+    end
+    local digest = self:issue({ kind = "wheel_approval", key = id, value = decision })
+    return {
+      digest = digest,
+      rendered = '+approvals.' .. id .. '.decision = "' .. decision .. '"',
+      keys = { "wheel.approvals." .. id },
+      changed = true,
+    }
+  end
+
+  wheel.resolve_approval = function(id, decision, digest)
+    self:require("config.manage")
+    self:record("wheel.resolve_approval", id, decision, digest)
+    self:config_fail()
+    self:consume(digest, { kind = "wheel_approval", key = id, value = decision })
+    local apr = self:find_wheel_approval(id)
+    if apr ~= nil then
+      apr.status = "resolved"
+      apr.decision = decision
+    end
+    return { id = id, decision = decision, resolved = true, changed = true, reload = "none" }
+  end
+
+  return wheel
+end
+
 function MockHost:build()
   local self = self
   local bitty = {
@@ -902,6 +1142,10 @@ function MockHost:build()
     bitty.plugins = self:build_plugins()
     bitty.profiles = self:build_profiles()
     bitty.config.profiles = bitty.profiles
+    if self.wheel_enabled then
+      bitty.wheel = self:build_wheel()
+      bitty.config.wheel = bitty.wheel
+    end
   end
 
   return bitty

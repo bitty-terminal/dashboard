@@ -98,6 +98,7 @@ local function unavailable_all(reason)
     extensions = failure,
     settings = failure,
     profiles = failure,
+    wheel = failure,
   }
 end
 
@@ -126,7 +127,11 @@ local load_selected_value
 -- plugin and profile lists are fetched only for the tab that shows them.
 local function active_lists()
   local active = model.section(state.nav.index).id
-  return { plugins = active == "plugins", profiles = active == "profiles" }
+  return {
+    plugins = active == "plugins",
+    profiles = active == "profiles",
+    wheel = active == "wheel",
+  }
 end
 
 -- Re-read the snapshot and, when the grant allows it, the managed sections.
@@ -184,6 +189,13 @@ local function collect_list(section_id)
     local profiles, err = config.profiles(bitty)
     if profiles ~= nil then
       managed.profiles = profiles
+    elseif config.is_blocked(err) then
+      block_manage()
+    end
+  elseif section_id == "wheel" and managed.wheel == nil then
+    local wheel, err = config.wheel(bitty)
+    if wheel ~= nil then
+      managed.wheel = wheel
     elseif config.is_blocked(err) then
       block_manage()
     end
@@ -690,6 +702,90 @@ local function begin_profile_delete(item, opts)
   preview_profile_delete(item.name, opts)
 end
 
+local function preview_wheel_setting(key, value, kind, notice)
+  if not config.wheel_manageable(bitty) then
+    state.edit = edit.notice(state.edit, "Wheel management unavailable on this host")
+    return false
+  end
+  local preview, err = config.preview_wheel(bitty, key, value)
+  if preview == nil then
+    write_failure(err)
+    return false
+  end
+  state.edit = edit.start_confirm(state.edit, {
+    target = edit.TARGET_WHEEL_SETTING,
+    subject = key,
+    kind = kind or config.KIND_TEXT,
+    value = value,
+    preview = preview,
+    notice = notice,
+  })
+  return true
+end
+
+local function preview_wheel_auth_set(provider, api_key, notice)
+  if not config.wheel_manageable(bitty) then
+    state.edit = edit.notice(state.edit, "Wheel management unavailable on this host")
+    return false
+  end
+  local preview, err = config.preview_wheel_auth_set(bitty, provider, api_key)
+  if preview == nil then
+    write_failure(err)
+    return false
+  end
+  state.edit = edit.start_confirm(state.edit, {
+    target = edit.TARGET_WHEEL_AUTH_SET,
+    subject = provider,
+    kind = config.KIND_SECRET,
+    value = api_key,
+    preview = preview,
+    notice = notice,
+  })
+  return true
+end
+
+local function preview_wheel_auth_remove(provider, notice)
+  if not config.wheel_manageable(bitty) then
+    state.edit = edit.notice(state.edit, "Wheel management unavailable on this host")
+    return false
+  end
+  local preview, err = config.preview_wheel_auth_remove(bitty, provider)
+  if preview == nil then
+    write_failure(err)
+    return false
+  end
+  state.edit = edit.start_confirm(state.edit, {
+    target = edit.TARGET_WHEEL_AUTH_REMOVE,
+    subject = provider,
+    kind = config.KIND_TEXT,
+    value = nil,
+    preview = preview,
+    notice = notice,
+  })
+  return true
+end
+
+local function preview_wheel_resolve_approval(id, decision, notice)
+  if not config.wheel_manageable(bitty) then
+    state.edit = edit.notice(state.edit, "Wheel management unavailable on this host")
+    return false
+  end
+  local preview, err = config.preview_wheel_resolve_approval(bitty, id, decision)
+  if preview == nil then
+    write_failure(err)
+    return false
+  end
+  state.edit = edit.start_confirm(state.edit, {
+    target = edit.TARGET_WHEEL_APPROVAL,
+    subject = id,
+    kind = config.KIND_TEXT,
+    value = decision,
+    preview = preview,
+    notice = notice,
+  })
+  return true
+end
+
 -- Re-run the preview for one pending intent. Used after a stale digest or an
 -- expired approval: the user reviews the fresh rendering before the second
 -- Enter.
@@ -707,6 +803,14 @@ local function repreview(pending, notice)
     preview, err = config.preview_rename(bitty, pending.subject, pending.value, pending.opts)
   elseif pending.target == edit.TARGET_PROFILE_DELETE then
     preview, err = config.preview_delete(bitty, pending.subject, pending.opts)
+  elseif pending.target == edit.TARGET_WHEEL_SETTING then
+    preview, err = config.preview_wheel(bitty, pending.subject, pending.value)
+  elseif pending.target == edit.TARGET_WHEEL_AUTH_SET then
+    preview, err = config.preview_wheel_auth_set(bitty, pending.subject, pending.value)
+  elseif pending.target == edit.TARGET_WHEEL_AUTH_REMOVE then
+    preview, err = config.preview_wheel_auth_remove(bitty, pending.subject)
+  elseif pending.target == edit.TARGET_WHEEL_APPROVAL then
+    preview, err = config.preview_wheel_resolve_approval(bitty, pending.subject, pending.value)
   else
     preview, err = config.preview_use(bitty, pending.subject)
   end
@@ -863,7 +967,24 @@ local function refresh_settings_after_profile()
   if fresh ~= nil then
     fresh.plugins = managed.plugins
     fresh.profiles = managed.profiles
+    fresh.wheel = managed.wheel
     state.manage = fresh
+  elseif config.is_blocked(err) then
+    block_manage()
+  end
+end
+
+local function refresh_wheel()
+  local managed = state.manage
+  if managed == nil or state.config_blocked then
+    return
+  end
+  local wheel, err = config.wheel(bitty)
+  if wheel ~= nil then
+    managed.wheel = wheel
+    if state.data ~= nil and state.data.manage ~= nil then
+      state.data.manage.wheel = wheel
+    end
   elseif config.is_blocked(err) then
     block_manage()
   end
@@ -1012,6 +1133,93 @@ local function apply_pending()
     return
   end
 
+  if pending.target == edit.TARGET_WHEEL_SETTING then
+    local result, err = config.set_wheel(bitty, pending.subject, pending.value, pending.digest)
+    if result == nil then
+      if err.code == config.CODE_STALE then
+        repreview(pending, "the Wheel setting changed, review again")
+      elseif err.code == config.CODE_APPROVAL_REQUIRED or err.code == config.CODE_APPROVAL_MISMATCH then
+        repreview(pending, "approval expired, review again")
+      else
+        write_failure(err)
+      end
+      return
+    end
+    refresh_wheel()
+    refresh_snapshot()
+    local note = result.changed
+        and ("applied wheel." .. pending.subject .. " · reload " .. reload_note(result.reload))
+      or "no change"
+    state.edit = edit.notice(edit.new(), note)
+    return
+  end
+
+  if pending.target == edit.TARGET_WHEEL_AUTH_SET then
+    local result, err = config.wheel_auth_set(bitty, pending.subject, pending.value, pending.digest)
+    if result == nil then
+      if err.code == config.CODE_STALE then
+        repreview(pending, "the credential store changed, review again")
+      elseif err.code == config.CODE_APPROVAL_REQUIRED or err.code == config.CODE_APPROVAL_MISMATCH then
+        repreview(pending, "approval expired, review again")
+      else
+        write_failure(err)
+      end
+      return
+    end
+    refresh_wheel()
+    refresh_snapshot()
+    local note = result.changed
+        and ("stored API key for " .. pending.subject .. " · reload " .. reload_note(result.reload))
+      or "no change"
+    state.edit = edit.notice(edit.new(), note)
+    return
+  end
+
+  if pending.target == edit.TARGET_WHEEL_AUTH_REMOVE then
+    local result, err = config.wheel_auth_remove(bitty, pending.subject, pending.digest)
+    if result == nil then
+      if err.code == config.CODE_STALE then
+        repreview(pending, "the credential store changed, review again")
+      elseif err.code == config.CODE_APPROVAL_REQUIRED or err.code == config.CODE_APPROVAL_MISMATCH then
+        repreview(pending, "approval expired, review again")
+      else
+        write_failure(err)
+      end
+      return
+    end
+    refresh_wheel()
+    refresh_snapshot()
+    local note = result.changed
+        and ("cleared API key for " .. pending.subject .. " · reload " .. reload_note(result.reload))
+      or "no change"
+    state.edit = edit.notice(edit.new(), note)
+    return
+  end
+
+  if pending.target == edit.TARGET_WHEEL_APPROVAL then
+    local result, err = config.wheel_resolve_approval(bitty, pending.subject, pending.value, pending.digest)
+    if result == nil then
+      if err.code == config.CODE_STALE then
+        repreview(pending, "the approval queue changed, review again")
+      elseif err.code == config.CODE_APPROVAL_REQUIRED or err.code == config.CODE_APPROVAL_MISMATCH then
+        repreview(pending, "approval expired, review again")
+      else
+        write_failure(err)
+      end
+      return
+    end
+    refresh_wheel()
+    refresh_snapshot()
+    local note = "resolved "
+      .. pending.subject
+      .. " -> "
+      .. tostring(pending.value)
+      .. " · reload "
+      .. reload_note(result.reload)
+    state.edit = edit.notice(edit.new(), note)
+    return
+  end
+
   local result, err = config.use(bitty, pending.subject, pending.digest)
   if result == nil then
     if err.code == config.CODE_STALE then
@@ -1085,6 +1293,92 @@ local function activate_selected(named, literal)
     end
     return false
   end
+  if section.id == "wheel" then
+    local managed = state.data and state.data.manage
+    if managed == nil or managed.wheel == nil or managed.wheel.manageable == false then
+      return false
+    end
+    local view = model.build(state.data, state.nav, { height = state.height })
+    local act = view.wheel_actions and view.wheel_actions[state.nav.cursor + 1] or nil
+    if act == nil or act.kind == "none" then
+      return false
+    end
+    if act.kind == "bool" and (is_enter or is_space) then
+      preview_wheel_setting(act.key, not (act.current == true), config.KIND_BOOL)
+      return true
+    end
+    if act.kind == "enum" and (is_enter or is_space) then
+      preview_wheel_setting(act.key, edit.next_enum(act.current, act.values), config.KIND_TEXT)
+      return true
+    end
+    if act.kind == "text" then
+      if is_enter then
+        state.edit = edit.start_input(state.edit, {
+          target = edit.TARGET_WHEEL_SETTING,
+          subject = act.key,
+          kind = config.KIND_TEXT,
+          seed = act.current or "",
+          prompt = "wheel." .. act.key .. " = ",
+        })
+        return true
+      end
+      if literal == "x" or named == "delete" then
+        preview_wheel_setting(act.key, "", config.KIND_TEXT)
+        return true
+      end
+      return false
+    end
+    if act.kind == "provider" then
+      if is_enter or literal == "m" then
+        state.edit = edit.start_input(state.edit, {
+          target = edit.TARGET_WHEEL_SETTING,
+          subject = act.key,
+          kind = config.KIND_TEXT,
+          seed = act.current or "",
+          prompt = act.key .. " = ",
+        })
+        return true
+      end
+      if literal == "a" then
+        state.edit = edit.start_input(state.edit, {
+          target = edit.TARGET_WHEEL_AUTH_SET,
+          subject = act.provider,
+          kind = config.KIND_SECRET,
+          seed = "",
+          prompt = "api key (" .. act.provider .. ") = ",
+        })
+        return true
+      end
+      if literal == "x" or named == "delete" then
+        preview_wheel_auth_remove(act.provider)
+        return true
+      end
+      return false
+    end
+    if act.kind == "approval" then
+      if act.status ~= "pending" then
+        if is_enter or literal == "s" or literal == "d" then
+          state.edit = edit.notice(state.edit, act.id .. " is already " .. tostring(act.status))
+          return true
+        end
+        return false
+      end
+      if is_enter then
+        preview_wheel_resolve_approval(act.id, "allow_once")
+        return true
+      end
+      if literal == "s" then
+        preview_wheel_resolve_approval(act.id, "allow_session")
+        return true
+      end
+      if literal == "d" then
+        preview_wheel_resolve_approval(act.id, "deny")
+        return true
+      end
+      return false
+    end
+    return false
+  end
   if not is_enter and not is_space then
     return false
   end
@@ -1116,20 +1410,32 @@ local function handle_edit_key(event)
   local named = key_named(event)
   if state.edit.mode == edit.MODE_INPUT then
     if named == "enter" then
-      local value, message = edit.parse_value(state.edit.kind, state.edit.buffer or "")
+      local target = state.edit.target
+      local subject = state.edit.subject
+      local opts = state.edit.opts
+      if target == edit.TARGET_WHEEL_SETTING and subject == "default_model" then
+        local trimmed = text.single_line(state.edit.buffer or "")
+        if trimmed == "" then
+          preview_wheel_setting(subject, "", config.KIND_TEXT)
+          return true, true
+        end
+      end
+      local parse_kind = state.edit.kind == config.KIND_SECRET and config.KIND_TEXT or state.edit.kind
+      local value, message = edit.parse_value(parse_kind, state.edit.buffer or "")
       if value == nil then
         state.edit = edit.invalid(state.edit, message)
         return true, true
       end
-      local target = state.edit.target
-      local subject = state.edit.subject
-      local opts = state.edit.opts
       if target == edit.TARGET_PROFILE_CREATE then
         preview_profile_create(value, opts)
       elseif target == edit.TARGET_PROFILE_CLONE then
         preview_profile_clone(subject, value, opts)
       elseif target == edit.TARGET_PROFILE_RENAME then
         preview_profile_rename(subject, value, opts)
+      elseif target == edit.TARGET_WHEEL_SETTING then
+        preview_wheel_setting(subject, value, state.edit.kind)
+      elseif target == edit.TARGET_WHEEL_AUTH_SET then
+        preview_wheel_auth_set(subject, value)
       else
         preview_config(subject, value)
       end

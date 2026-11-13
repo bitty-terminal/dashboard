@@ -367,4 +367,123 @@ function M.diff_lines_slices_utf8_boundary_at_max_rendered_bytes()
   end
 end
 
+function M.wheel_adapters_and_config_wheel_fallback()
+  local host = fake_host()
+  local wheel_surface = {
+    get = function()
+      return {
+        default_provider = "opencode-go",
+        default_model = "deepseek-v4.1-flash",
+        thinking_enabled = true,
+        thinking_gear = "high",
+        approval_mode = "dashboard",
+        providers = {
+          {
+            name = "opencode-go",
+            label = "OpenCode Go",
+            protocol = "openai",
+            default_model = "deepseek-v4.1-flash",
+            model = "deepseek-v4.1-flash",
+            model_source = "default",
+            auth_env = "OPENCODE_API_KEY",
+            has_auth = true,
+            auth_source = "data_credentials",
+          },
+        },
+        permissions = {
+          { tool = "read_file", mode = "auto" },
+          { tool = "bash", mode = "ask" },
+        },
+        approvals = {
+          {
+            id = "apr-1234",
+            session_id = "sess-1",
+            tool = "run_command",
+            risk = "execute",
+            summary = "cargo test",
+            status = "pending",
+          },
+        },
+        truncated = false,
+      }
+    end,
+    preview = function(key, value)
+      return { digest = digest("6"), rendered = "+" .. key .. " = " .. tostring(value), keys = { "wheel." .. key } }
+    end,
+    set = function()
+      return { applied = true, changed = true, reload = "none" }
+    end,
+    preview_auth_set = function(provider)
+      return {
+        digest = digest("7"),
+        rendered = '+credentials.' .. provider .. ' = "***REDACTED***"',
+        keys = { "wheel.credentials." .. provider },
+      }
+    end,
+    auth_set = function(provider)
+      return { provider = provider, configured = true, changed = true, reload = "none" }
+    end,
+    preview_auth_remove = function(provider)
+      return {
+        digest = digest("8"),
+        rendered = '-credentials.' .. provider .. ' = "***REDACTED***"',
+        keys = { "wheel.credentials." .. provider },
+      }
+    end,
+    auth_remove = function(provider)
+      return { provider = provider, removed = true, changed = true, reload = "none" }
+    end,
+    preview_resolve_approval = function(id, decision)
+      return {
+        digest = digest("9"),
+        rendered = '+approvals.' .. id .. ' = "' .. decision .. '"',
+        keys = { "wheel.approvals." .. id },
+      }
+    end,
+    resolve_approval = function(id, decision)
+      return { id = id, decision = decision, resolved = true, changed = true, reload = "none" }
+    end,
+  }
+  host.config.wheel = wheel_surface
+  if not config.wheel_readable(host) or not config.wheel_manageable(host) then
+    error("config.wheel fallback must satisfy wheel_readable and wheel_manageable")
+  end
+  local snap = config.wheel(host)
+  if snap == nil or snap.default_provider ~= "opencode-go" or not snap.manageable then
+    error("wheel() did not normalize snapshot")
+  end
+  if #snap.providers ~= 1 or snap.providers[1].id ~= "opencode-go" or not snap.providers[1].auth_configured then
+    error("wheel() did not normalize provider name/has_auth")
+  end
+  if snap.permissions.read_file ~= "auto" or snap.permissions.bash ~= "ask" then
+    error("wheel() did not normalize permissions array")
+  end
+  if #snap.approvals ~= 1 or snap.approvals[1].id ~= "apr-1234" then
+    error("wheel() did not normalize approvals")
+  end
+  local p_set = config.preview_wheel(host, "thinking_gear", "max")
+  if p_set == nil or p_set.digest ~= digest("6") then
+    error("preview_wheel failed")
+  end
+  local r_set = config.set_wheel(host, "thinking_gear", "max", p_set.digest)
+  if r_set == nil or not r_set.applied then
+    error("set_wheel failed")
+  end
+  local p_auth = config.preview_wheel_auth_set(host, "opencode-go", "sk-secret")
+  local r_auth = config.wheel_auth_set(host, "opencode-go", "sk-secret", p_auth.digest)
+  if r_auth == nil or not r_auth.configured then
+    error("wheel_auth_set failed")
+  end
+  local p_rm = config.preview_wheel_auth_remove(host, "opencode-go")
+  local r_rm = config.wheel_auth_remove(host, "opencode-go", p_rm.digest)
+  if r_rm == nil or not r_rm.removed then
+    error("wheel_auth_remove failed")
+  end
+  local p_apr = config.preview_wheel_resolve_approval(host, "apr-1234", "allow_once")
+  local r_apr = config.wheel_resolve_approval(host, "apr-1234", "allow_once", p_apr.digest)
+  if r_apr == nil or not r_apr.resolved or r_apr.decision ~= "allow_once" then
+    error("wheel_resolve_approval failed")
+  end
+end
+
 return M
