@@ -32,7 +32,7 @@ describe("bitty-plugin.toml", () => {
     const model = loadManifestModel(manifestSource);
     expect(model.pluginId).toBe("bitty-terminal.dashboard");
     expect(model.name).toBe("Dashboard");
-    expect(model.version).toBe("0.2.0");
+    expect(model.version).toBe("0.3.0");
     expect(model.pluginApiRange).toBe("^1.0");
     expect(manifestSource).toContain('bitty = ">=0.0.31"');
     // Minimum-only: a declared ceiling would reject newer compatible hosts.

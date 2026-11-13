@@ -11,7 +11,7 @@ local function key(text_value, data)
 end
 
 function M.sections_are_ordered_and_named()
-  local expected = { "overview", "plugins", "extensions", "settings", "profiles", "diagnostics" }
+  local expected = { "overview", "plugins", "extensions", "settings", "profiles", "wheel", "diagnostics" }
   if #model.SECTIONS ~= #expected then
     error("unexpected section count")
   end
@@ -20,7 +20,7 @@ function M.sections_are_ordered_and_named()
       error("section " .. index .. " is " .. model.SECTIONS[index].id)
     end
   end
-  if model.section_index("settings") ~= 4 then
+  if model.section_index("settings") ~= 4 or model.section_index("wheel") ~= 6 or model.section_index("diagnostics") ~= 7 then
     error("section ids must resolve to their index")
   end
 end

@@ -6,7 +6,7 @@
 -- without a plugin VM.
 --
 -- Section order is the user-visible contract: Overview, Plugins, Extensions,
--- Settings, Profiles, Diagnostics. "Extensions" names the installable
+-- Settings, Profiles, Wheel, Diagnostics. "Extensions" names the installable
 -- artifacts; the word "components" never appears in user-facing text.
 
 local edit = require("dashboard.edit")
@@ -20,6 +20,7 @@ M.SECTIONS = {
   { id = "extensions", title = "Extensions" },
   { id = "settings", title = "Settings" },
   { id = "profiles", title = "Profiles" },
+  { id = "wheel", title = "Wheel" },
   { id = "diagnostics", title = "Diagnostics" },
 }
 
@@ -29,12 +30,13 @@ M.MIN_PAGE = 3
 
 M.READ_ONLY_NOTE = "Read-only: config.manage is not granted (or this host has no writable user layer)."
 M.OVERVIEW_NOTE = "Read-only. config.manage is not granted (or this host has no writable user layer)."
-M.OVERVIEW_EDITABLE_NOTE = "Settings, plugins, and profiles are editable from their tabs."
+M.OVERVIEW_EDITABLE_NOTE = "Settings, plugins, profiles, and Wheel are editable from their tabs."
 
 M.ACTION_HINT_SETTINGS = "Enter edit"
 M.ACTION_HINT_PLUGINS = "Space toggle"
 M.ACTION_HINT_PROFILES = "Enter use"
 M.ACTION_HINT_PROFILES_LIFECYCLE = "Enter use · n new · c clone · e rename · d delete"
+M.ACTION_HINT_WHEEL = "Enter edit/allow · a key · x clear · s sess · d deny"
 
 M.ACTION_NONE = "none"
 M.ACTION_CLOSE = "close"
@@ -225,6 +227,23 @@ local function overview_rows(data, editable)
     end
     return ""
   end)
+  if data.manage ~= nil and type(data.manage.wheel) == "table" then
+    local w = data.manage.wheel
+    local pending_count = 0
+    local approvals = type(w.approvals) == "table" and w.approvals or {}
+    for index = 1, #approvals do
+      if approvals[index].status == "pending" then
+        pending_count = pending_count + 1
+      end
+    end
+    local think_label = w.thinking_enabled and ("thinking " .. tostring(w.thinking_gear)) or "thinking off"
+    rows[#rows + 1] = row(join({
+      "Wheel: " .. tostring(w.default_provider),
+      think_label,
+      "approvals " .. tostring(w.approval_mode),
+      string.format("%d pending", pending_count),
+    }))
+  end
 
   rows[#rows + 1] = row(editable and M.OVERVIEW_EDITABLE_NOTE or M.OVERVIEW_NOTE, true)
   return rows
@@ -361,6 +380,151 @@ local function managed_profile_rows(section)
   return rows
 end
 
+local WHEEL_PROVIDER_ENUM = {
+  "opencode-go",
+  "openai",
+  "anthropic",
+  "deepseek",
+  "openrouter",
+  "ollama",
+}
+
+local WHEEL_GEAR_ENUM = { "low", "medium", "high", "xhigh" }
+local WHEEL_APPROVAL_MODE_ENUM = { "prompt", "dashboard", "auto-allow", "auto-deny" }
+local WHEEL_PERM_ENUM = { "auto", "ask", "deny" }
+local WHEEL_PERM_KEYS = { "read_file", "write_file", "edit_file", "glob", "grep", "bash" }
+
+local function managed_wheel_rows(wheel)
+  local rows = {}
+  local actions = {}
+  local function push(text_value, dim, action)
+    rows[#rows + 1] = row(text_value, dim)
+    actions[#rows] = action
+  end
+
+  local provider = wheel.default_provider or "opencode-go"
+  push(
+    join({ 'Default provider = "' .. provider .. '"', "settings.json" }),
+    false,
+    { kind = "enum", key = "default_provider", current = provider, values = WHEEL_PROVIDER_ENUM }
+  )
+
+  local def_model = wheel.default_model or ""
+  local def_model_label = def_model ~= "" and ('"' .. def_model .. '"') or "(provider default)"
+  push(
+    join({ "Default model = " .. def_model_label, "settings.json" }),
+    false,
+    { kind = "text", key = "default_model", current = def_model, clearable = (def_model ~= "") }
+  )
+
+  local think_on = wheel.thinking_enabled ~= false
+  push(
+    join({ "Thinking enabled = " .. (think_on and "true" or "false"), "settings.json" }),
+    false,
+    { kind = "bool", key = "thinking_enabled", current = think_on }
+  )
+
+  local gear = wheel.thinking_gear or "high"
+  push(
+    join({
+      'Thinking gear = "' .. gear .. '"',
+      think_on and "active" or "inactive (thinking disabled)",
+    }),
+    not think_on,
+    { kind = "enum", key = "thinking_gear", current = gear, values = WHEEL_GEAR_ENUM }
+  )
+
+  local apr_mode = wheel.approval_mode or "prompt"
+  push(
+    join({ 'Approval mode = "' .. apr_mode .. '"', "settings.json" }),
+    false,
+    { kind = "enum", key = "approval_mode", current = apr_mode, values = WHEEL_APPROVAL_MODE_ENUM }
+  )
+
+  local providers = type(wheel.providers) == "table" and wheel.providers or {}
+  for index = 1, #providers do
+    local item = providers[index]
+    local pid = item.id or item.name or ""
+    local model_str = (item.model ~= nil and item.model ~= "") and item.model or (item.default_model or "")
+    local has_auth = item.auth_configured == true or item.has_auth == true
+    local auth_str = has_auth and ("key: " .. (item.auth_source or "data_credentials") .. " (***)")
+      or "key: missing"
+    push(
+      join({
+        "Provider " .. pid,
+        'model "' .. model_str .. '"',
+        auth_str,
+      }),
+      false,
+      {
+        kind = "provider",
+        provider = pid,
+        key = "providers." .. pid .. ".model",
+        current = model_str,
+        auth_configured = has_auth,
+        auth_source = item.auth_source or "none",
+      }
+    )
+  end
+
+  local perms = type(wheel.permissions) == "table" and wheel.permissions or {}
+  if #perms > 0 then
+    for index = 1, #perms do
+      local item = perms[index]
+      if type(item) == "table" and type(item.tool) == "string" and item.tool ~= "" then
+        local val = item.mode or "ask"
+        push(
+          join({ 'Permission ' .. item.tool .. ' = "' .. val .. '"', "settings.json" }),
+          false,
+          { kind = "enum", key = "permissions." .. item.tool, current = val, values = WHEEL_PERM_ENUM }
+        )
+      end
+    end
+  else
+    for index = 1, #WHEEL_PERM_KEYS do
+      local perm_key = WHEEL_PERM_KEYS[index]
+      local val = perms[perm_key]
+        or ((perm_key == "read_file" or perm_key == "glob" or perm_key == "grep") and "auto" or "ask")
+      push(
+        join({ 'Permission ' .. perm_key .. ' = "' .. val .. '"', "settings.json" }),
+        false,
+        { kind = "enum", key = "permissions." .. perm_key, current = val, values = WHEEL_PERM_ENUM }
+      )
+    end
+  end
+
+  local approvals = type(wheel.approvals) == "table" and wheel.approvals or {}
+  if #approvals == 0 then
+    push("Approvals: no pending requests", true, { kind = "none" })
+  else
+    for index = 1, #approvals do
+      local apr = approvals[index]
+      local status_str = apr.status or "pending"
+      if type(apr.decision) == "string" and apr.decision ~= "" then
+        status_str = status_str .. " (" .. apr.decision .. ")"
+      end
+      push(
+        join({
+          "Approval " .. apr.id,
+          apr.tool ~= "" and apr.tool or "tool",
+          status_str,
+          apr.summary ~= "" and apr.summary or "",
+        }),
+        apr.status ~= "pending",
+        {
+          kind = "approval",
+          id = apr.id,
+          status = apr.status or "pending",
+          tool = apr.tool or "",
+          summary = apr.summary or "",
+        }
+      )
+    end
+  end
+
+  return rows, actions
+end
+
 local function diagnostics_rows(section)
   local rows = {}
   local value = section.value
@@ -389,6 +553,7 @@ local EMPTY_TEXT = {
   extensions = "No extensions installed.",
   settings = "No declared settings rows.",
   profiles = "No profiles defined.",
+  wheel = "No Wheel configuration available (requires config.manage).",
   diagnostics = "No diagnostics reported by the host.",
   overview = "No overview data.",
 }
@@ -490,6 +655,20 @@ function M.build(data, state, opts)
         or M.ACTION_HINT_PROFILES
     else
       view.rows = profile_rows(source)
+    end
+  elseif section.id == "wheel" then
+    if managed_section ~= nil then
+      local w_rows, w_actions = managed_wheel_rows(managed_section)
+      view.rows = w_rows
+      view.wheel_actions = w_actions
+      if managed_section.manageable ~= false then
+        view.action_hint = M.ACTION_HINT_WHEEL
+      else
+        view.note = M.READ_ONLY_NOTE
+      end
+    else
+      view.rows = {}
+      view.note = M.READ_ONLY_NOTE
     end
   else
     view.rows = diagnostics_rows(source)

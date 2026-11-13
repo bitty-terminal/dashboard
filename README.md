@@ -31,6 +31,7 @@ Sections:
 | Extensions  | Every installed extension: version, tier, ABI compatibility, activation, trust, descriptor digest, executable name. |
 | Settings    | Editable allowlisted keys with current value and logical source; preview and confirm before every write.            |
 | Profiles    | Defined profiles and which one is active; switch with a previewed, token-bound write.                               |
+| Wheel       | Wheel AI harness defaults, thinking toggle/gear, provider models, masked API keys, tool permissions, and approvals. |
 | Diagnostics | App version, config file/dir, plugin ledger, plugin store, extension roots, font, decoration.                       |
 
 Each section either renders bounded rows or an explicit
@@ -172,28 +173,31 @@ A single-character key needs a modifier; named keys may stand alone. Use
 
 While the panel is open it owns a transient input capture, so its own keys are:
 
-| Key                   | Action                                                           |
-| --------------------- | ---------------------------------------------------------------- |
-| `j` / `Down`          | Next row                                                         |
-| `k` / `Up`            | Previous row                                                     |
-| `h` / `Left`          | Previous section                                                 |
-| `l` / `Right`, `Tab`  | Next section                                                     |
-| `Shift+Tab`           | Previous section                                                 |
-| `1` … `6`             | Jump to a section                                                |
-| `g` / `Home`          | First row                                                        |
-| `G` / `End`           | Last row                                                         |
-| `PageUp` / `PageDown` | One page up or down                                              |
-| Mouse wheel           | Scroll the active section                                        |
-| `Enter`               | Edit the selected setting, or preview the selected toggle/switch |
-| `Space`               | Toggle the selected plugin                                       |
-| `n` / `a`             | Create a new profile on the Profiles tab                         |
-| `c`                   | Clone the selected profile on the Profiles tab                   |
-| `e` / `R`             | Rename the selected profile on the Profiles tab                  |
-| `d` / `x`             | Preview deleting the selected profile on the Profiles tab        |
-| `Enter` (again)       | Apply the previewed change                                       |
-| `Esc`                 | Cancel the edit or confirm step, or close the panel              |
-| `r`                   | Re-read the snapshot and the managed values                      |
-| `q`                   | Close the panel                                                  |
+| Key                   | Action                                                                 |
+| --------------------- | ---------------------------------------------------------------------- |
+| `j` / `Down`          | Next row                                                               |
+| `k` / `Up`            | Previous row                                                           |
+| `h` / `Left`          | Previous section                                                       |
+| `l` / `Right`, `Tab`  | Next section                                                           |
+| `Shift+Tab`           | Previous section                                                       |
+| `1` … `7`             | Jump to a section                                                      |
+| `g` / `Home`          | First row                                                              |
+| `G` / `End`           | Last row                                                               |
+| `PageUp` / `PageDown` | One page up or down                                                    |
+| Mouse wheel           | Scroll the active section                                              |
+| `Enter`               | Edit the selected setting, or preview the selected toggle/switch       |
+| `Space`               | Toggle the selected plugin                                             |
+| `n` / `a`             | Create a new profile on the Profiles tab                               |
+| `c`                   | Clone the selected profile on the Profiles tab                         |
+| `e` / `R`             | Rename the selected profile on the Profiles tab                        |
+| `d` / `x`             | Preview deleting the selected profile on the Profiles tab              |
+| `a` (Wheel provider)  | Set API key for the selected Wheel provider (masked `*` input)         |
+| `x` (Wheel provider)  | Clear stored API key for the selected Wheel provider                   |
+| `Enter`/`s`/`d`       | Resolve a pending Wheel approval (`allow_once`/`allow_session`/`deny`) |
+| `Enter` (again)       | Apply the previewed change                                             |
+| `Esc`                 | Cancel the edit or confirm step, or close the panel                    |
+| `r`                   | Re-read the snapshot and the managed values                            |
+| `q`                   | Close the panel                                                        |
 
 While an input is open, printable characters type into it, `Backspace`
 deletes, `Enter` previews, and `Esc` cancels. While a change is awaiting

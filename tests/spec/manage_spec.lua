@@ -638,4 +638,149 @@ function M.profile_lifecycle_gracefully_degrades_on_switch_only_host()
   end
 end
 
+function M.wheel_settings_masked_auth_and_approvals_flow()
+  local host, plugin = load({
+    wheel_approvals = {
+      {
+        id = "apr-101",
+        session_id = "sess-1",
+        tool = "run_command",
+        risk = "execute",
+        summary = "echo one",
+        status = "pending",
+      },
+      {
+        id = "apr-102",
+        session_id = "sess-1",
+        tool = "run_command",
+        risk = "execute",
+        summary = "echo two",
+        status = "pending",
+      },
+      {
+        id = "apr-103",
+        session_id = "sess-1",
+        tool = "write_file",
+        risk = "mutate",
+        summary = "write three",
+        status = "pending",
+      },
+    },
+  })
+  host:run("toggle_dashboard")
+  if host:count_calls("wheel.get") ~= 0 then
+    error("opening the panel must not fetch wheel.get before visiting the Wheel tab")
+  end
+
+  -- Switch to section 6 (Wheel).
+  press(host, "6")
+  if plugin.status().section ~= "wheel" then
+    error("6 must select the Wheel section")
+  end
+  if host:count_calls("wheel.get") ~= 1 then
+    error("visiting the Wheel tab must fetch wheel.get once")
+  end
+  local initial_rendered = lines(host:component())
+  if not contains(initial_rendered, 'Default provider = "opencode-go"') then
+    error("Wheel tab did not render default_provider: " .. initial_rendered)
+  end
+  if not contains(initial_rendered, "6/7 Wheel") then
+    error("Footer did not show 6/7 Wheel: " .. initial_rendered)
+  end
+
+  -- 1. Cycle default_provider on row 1 with Enter -> Enter.
+  press(host, "key:Enter")
+  if plugin.status().mode ~= "confirm" then
+    error("Enter on Default provider must preview next provider")
+  end
+  press(host, "key:Enter")
+  if host.wheel_state.default_provider ~= "openai" then
+    error("default_provider did not cycle to openai")
+  end
+
+  -- 2. Toggle Thinking enabled on row 3 (move down 2 rows from row 1).
+  press(host, "j")
+  press(host, "j")
+  press(host, "key:Enter")
+  press(host, "key:Enter")
+  if host.wheel_state.thinking_enabled ~= false then
+    error("thinking_enabled did not toggle to false")
+  end
+  if not contains(lines(host:component()), "inactive (thinking disabled)") then
+    error("Thinking gear row must show inactive when thinking_enabled is false")
+  end
+
+  -- 3. Provider row 6 (opencode-go): move down 3 rows (row 4 gear, row 5 approval_mode, row 6 provider opencode-go).
+  press(host, "j")
+  press(host, "j")
+  press(host, "j")
+  -- Press "a" to set API key with masked input.
+  press(host, "a")
+  if plugin.status().mode ~= "input" then
+    error("a on a provider row must open secret API key input")
+  end
+  local secret = "sk-live-secret-999"
+  for index = 1, #secret do
+    press(host, secret:sub(index, index))
+  end
+  local input_screen = lines(host:component())
+  if contains(input_screen, secret) or contains(input_screen, "sk-live") then
+    error("secret input leaked raw API key on screen: " .. input_screen)
+  end
+  if not contains(input_screen, "api key (opencode-go) = " .. string.rep("*", #secret)) then
+    error("secret input did not render masked asterisks: " .. input_screen)
+  end
+  press(host, "key:Enter")
+  if plugin.status().mode ~= "confirm" then
+    error("Enter after typing API key must open confirm view")
+  end
+  local confirm_screen = lines(host:component())
+  if contains(confirm_screen, secret) or contains(confirm_screen, "sk-live") then
+    error("confirm view leaked raw API key on screen: " .. confirm_screen)
+  end
+  if not contains(confirm_screen, "***REDACTED***") then
+    error("confirm view must show ***REDACTED***")
+  end
+  press(host, "key:Enter")
+  local auth_call = host:last_call("wheel.auth_set")
+  if auth_call == nil or auth_call.args[1] ~= "opencode-go" or auth_call.args[2] ~= secret then
+    error("wheel.auth_set did not receive the secret and digest")
+  end
+
+  -- 4. Clear stored API key with "x" -> Enter.
+  press(host, "x")
+  if plugin.status().mode ~= "confirm" then
+    error("x on a configured provider row must preview auth_remove")
+  end
+  press(host, "key:Enter")
+  if host:find_wheel_provider("opencode-go").auth_configured ~= false then
+    error("x did not clear provider credential")
+  end
+
+  -- 5. Resolve pending approvals: jump to bottom ("G" is apr-103, "k" is apr-102, "k" is apr-101).
+  press(host, "key:End")
+  press(host, "k")
+  press(host, "k")
+  -- apr-101: Enter -> allow_once
+  press(host, "key:Enter")
+  press(host, "key:Enter")
+  if host:find_wheel_approval("apr-101").decision ~= "allow_once" then
+    error("Enter on pending approval did not resolve allow_once")
+  end
+  -- apr-102: "s" -> allow_session
+  press(host, "j")
+  press(host, "s")
+  press(host, "key:Enter")
+  if host:find_wheel_approval("apr-102").decision ~= "allow_session" then
+    error("s on pending approval did not resolve allow_session")
+  end
+  -- apr-103: "d" -> deny
+  press(host, "j")
+  press(host, "d")
+  press(host, "key:Enter")
+  if host:find_wheel_approval("apr-103").decision ~= "deny" then
+    error("d on pending approval did not resolve deny")
+  end
+end
+
 return M

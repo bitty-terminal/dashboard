@@ -40,12 +40,13 @@ function M.tabs(active_index, width)
   local cells = {}
   local total = 0
   local full = {}
+  local sep_cols = text.columns(M.SEPARATOR)
   for index = 1, #model.SECTIONS do
     local section = model.SECTIONS[index]
     full[#full + 1] = section.title
-    total = total + #section.title
+    total = total + text.columns(section.title)
     if index > 1 then
-      total = total + #M.SEPARATOR
+      total = total + sep_cols
     end
   end
   if total > width then

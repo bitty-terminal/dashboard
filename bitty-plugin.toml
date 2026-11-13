@@ -11,7 +11,7 @@
 [plugin]
 id = "bitty-terminal.dashboard"
 name = "Dashboard"
-version = "0.2.0"
+version = "0.3.0"
 description = "Configuration and status dashboard: inspect runtime state and edit settings, plugins, and profiles in one panel."
 license = "MIT"
 

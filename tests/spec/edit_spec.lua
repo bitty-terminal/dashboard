@@ -225,6 +225,56 @@ function M.value_rendering_is_typed()
   if edit.seed_value("steady_bar", "text") ~= "steady_bar" then
     error("the input seed must not be quoted")
   end
+  if edit.describe_value("supersecret", "secret") ~= "***REDACTED***" then
+    error("a secret value must render redacted")
+  end
+  if edit.seed_value("supersecret", "secret") ~= "" then
+    error("a secret input seed must always be empty")
+  end
+end
+
+function M.secret_input_masks_characters_and_redacts_confirm_rows()
+  local state = edit.start_input(edit.new(), {
+    target = edit.TARGET_WHEEL_AUTH_SET,
+    subject = "opencode-go",
+    kind = "secret",
+    seed = "should-not-seed",
+    prompt = "API key for opencode-go = ",
+  })
+  if state.buffer ~= "" then
+    error("secret input must ignore any initial seed")
+  end
+  state = edit.append(state, "s")
+  state = edit.append(state, "k")
+  state = edit.append(state, "-")
+  state = edit.append(state, "é")
+  if state.buffer ~= "sk-é" then
+    error("secret buffer did not record typed characters")
+  end
+  if edit.input_row(state) ~= "API key for opencode-go = ****" then
+    error("secret input row leaked plaintext or wrong mask count: " .. edit.input_row(state))
+  end
+
+  local confirm_state = edit.start_confirm(edit.new(), {
+    target = edit.TARGET_WHEEL_AUTH_SET,
+    subject = "opencode-go",
+    kind = "secret",
+    value = "sk-live-secret-token",
+    preview = {
+      digest = string.rep("f", 64),
+      lines = { '+credentials.opencode-go = "***REDACTED***"' },
+      keys = { "wheel.credentials.opencode-go" },
+      changed = true,
+    },
+  })
+  local rows = edit.confirm_rows(confirm_state)
+  local joined = table.concat(rows, "\n")
+  if string.find(joined, "sk-live-secret-token", 1, true) ~= nil then
+    error("confirm_rows leaked raw secret value: " .. joined)
+  end
+  if rows[1] ~= "Set API key for opencode-go = ***REDACTED***" then
+    error("unexpected wheel auth confirm header: " .. rows[1])
+  end
 end
 
 return M

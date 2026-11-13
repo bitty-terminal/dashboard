@@ -41,6 +41,7 @@ M.KIND_TEXT = "text"
 M.KIND_INTEGER = "integer"
 M.KIND_NUMBER = "number"
 M.KIND_BOOL = "bool"
+M.KIND_SECRET = "secret"
 M.KIND_ABSENT = "absent"
 
 M.CODE_DENIED = "E_CAPABILITY_DENIED"
@@ -105,6 +106,31 @@ M.ENUMS = {
   ["terminal.bell"] = { "off", "visual", "audible", "both" },
   ["close_confirm"] = { "always", "when_busy", "never" },
   ["scrollbar.mode"] = { "hidden", "always", "auto" },
+}
+
+M.WHEEL_PROVIDERS = {
+  "opencode-go",
+  "openai",
+  "anthropic",
+  "deepseek",
+  "openrouter",
+  "ollama",
+}
+
+M.WHEEL_PERMISSIONS = {
+  "read_file",
+  "write_file",
+  "edit_file",
+  "glob",
+  "grep",
+  "bash",
+}
+
+M.WHEEL_ENUMS = {
+  ["default_provider"] = M.WHEEL_PROVIDERS,
+  ["thinking_gear"] = { "low", "medium", "high", "xhigh" },
+  ["approval_mode"] = { "prompt", "dashboard", "auto-allow", "auto-deny" },
+  ["permission"] = { "auto", "ask", "deny" },
 }
 
 local KIND_BY_KEY = {}
@@ -197,6 +223,20 @@ local function profile_fn(host, method)
   return function_at(cfg, "profiles", method)
 end
 
+-- Resolve a Wheel verb from `bitty.wheel` or its read-only proxy alias
+-- `bitty.config.wheel` (bitty#3143).
+local function wheel_fn(host, method)
+  local fn = function_at(host, "wheel", method)
+  if fn ~= nil then
+    return fn
+  end
+  local cfg = table_at(host, "config")
+  if cfg == nil then
+    return nil
+  end
+  return function_at(cfg, "wheel", method)
+end
+
 -- Whether the host exposes the bounded read query at all. An older host has
 -- no `config` namespace, so the panel keeps its read-only rendering.
 function M.readable(host)
@@ -233,6 +273,22 @@ function M.profile_lifecycle(host)
     and profile_fn(host, "rename") ~= nil
     and profile_fn(host, "preview_delete") ~= nil
     and profile_fn(host, "delete") ~= nil
+end
+
+function M.wheel_readable(host)
+  return wheel_fn(host, "get") ~= nil
+end
+
+function M.wheel_manageable(host)
+  return M.wheel_readable(host)
+    and wheel_fn(host, "preview") ~= nil
+    and wheel_fn(host, "set") ~= nil
+    and wheel_fn(host, "preview_auth_set") ~= nil
+    and wheel_fn(host, "auth_set") ~= nil
+    and wheel_fn(host, "preview_auth_remove") ~= nil
+    and wheel_fn(host, "auth_remove") ~= nil
+    and wheel_fn(host, "preview_resolve_approval") ~= nil
+    and wheel_fn(host, "resolve_approval") ~= nil
 end
 
 local function invoke(fn, ...)
@@ -765,6 +821,265 @@ function M.delete(host, name, opts_or_digest, digest)
   }
 end
 
+-- `bitty.wheel.get()`: bounded Wheel state snapshot without raw credentials.
+function M.wheel(host)
+  local fn = wheel_fn(host, "get")
+  if fn == nil then
+    return nil, M.error(M.CODE_UNAVAILABLE, "host has no wheel.get surface")
+  end
+  local raw, err = invoke(fn)
+  if raw == nil then
+    return nil, err
+  end
+  local providers = {}
+  local raw_providers = type(raw.providers) == "table" and raw.providers or {}
+  for index = 1, #raw_providers do
+    if #providers >= M.MAX_ROWS then
+      break
+    end
+    local item = raw_providers[index]
+    if type(item) == "table" then
+      local id = text.field(item.name ~= nil and item.name or item.id, M.MAX_NAME_BYTES)
+      if id ~= "" then
+        local has_auth = boolean(item.has_auth) or boolean(item.auth_configured)
+        providers[#providers + 1] = {
+          id = id,
+          name = id,
+          label = text.field(item.label ~= nil and item.label or id, M.MAX_NAME_BYTES),
+          model = text.field(item.model, M.MAX_VALUE_BYTES),
+          default_model = text.field(item.default_model, M.MAX_VALUE_BYTES),
+          model_source = text.field(item.model_source ~= nil and item.model_source or "default", 32),
+          auth_configured = has_auth,
+          has_auth = has_auth,
+          auth_source = text.field(item.auth_source ~= nil and item.auth_source or "none", 32),
+        }
+      end
+    end
+  end
+
+  local permissions = {}
+  local raw_perms = type(raw.permissions) == "table" and raw.permissions or {}
+  if #raw_perms > 0 then
+    for index = 1, #raw_perms do
+      if #permissions >= M.MAX_ROWS then
+        break
+      end
+      local item = raw_perms[index]
+      if type(item) == "table" then
+        local tool = text.field(item.tool, M.MAX_NAME_BYTES)
+        local mode = text.field(item.mode, 16)
+        if tool ~= "" then
+          if mode ~= "auto" and mode ~= "allow" and mode ~= "ask" and mode ~= "deny" then
+            mode = "ask"
+          end
+          permissions[#permissions + 1] = { tool = tool, mode = mode }
+          permissions[tool] = mode
+        end
+      end
+    end
+  else
+    for index = 1, #M.WHEEL_PERMISSIONS do
+      local perm_key = M.WHEEL_PERMISSIONS[index]
+      local val = text.field(raw_perms[perm_key], 16)
+      if val ~= "auto" and val ~= "allow" and val ~= "ask" and val ~= "deny" then
+        val = (perm_key == "read_file" or perm_key == "glob" or perm_key == "grep") and "auto" or "ask"
+      end
+      permissions[#permissions + 1] = { tool = perm_key, mode = val }
+      permissions[perm_key] = val
+    end
+  end
+
+  local approvals = {}
+  local raw_approvals = type(raw.approvals) == "table" and raw.approvals or {}
+  for index = 1, #raw_approvals do
+    if #approvals >= M.MAX_ROWS then
+      break
+    end
+    local item = raw_approvals[index]
+    if type(item) == "table" then
+      local id = text.field(item.id, M.MAX_NAME_BYTES)
+      if id ~= "" then
+        approvals[#approvals + 1] = {
+          id = id,
+          tool = text.field(item.tool, M.MAX_NAME_BYTES),
+          summary = text.field(item.summary, M.MAX_VALUE_BYTES),
+          status = text.field(item.status ~= nil and item.status or "pending", 32),
+          decision = type(item.decision) == "string" and text.field(item.decision, 32) or nil,
+          created_at = finite(item.created_at) or 0,
+          expires_at = finite(item.expires_at) or 0,
+        }
+      end
+    end
+  end
+
+  local default_provider = text.field(raw.default_provider, M.MAX_NAME_BYTES)
+  if default_provider == "" then
+    default_provider = "opencode-go"
+  end
+  local default_model = type(raw.default_model) == "string" and text.field(raw.default_model, M.MAX_VALUE_BYTES) or ""
+  local thinking_gear = text.field(raw.thinking_gear, 16)
+  if
+    thinking_gear ~= "off"
+    and thinking_gear ~= "low"
+    and thinking_gear ~= "medium"
+    and thinking_gear ~= "high"
+    and thinking_gear ~= "xhigh"
+    and thinking_gear ~= "max"
+  then
+    thinking_gear = "high"
+  end
+  local approval_mode = text.field(raw.approval_mode, 32)
+  if
+    approval_mode ~= "prompt"
+    and approval_mode ~= "terminal"
+    and approval_mode ~= "dashboard"
+    and approval_mode ~= "auto-allow"
+    and approval_mode ~= "auto-deny"
+  then
+    approval_mode = "prompt"
+  end
+
+  return {
+    default_provider = default_provider,
+    default_model = default_model,
+    thinking_enabled = raw.thinking_enabled == nil and true or boolean(raw.thinking_enabled),
+    thinking_gear = thinking_gear,
+    approval_mode = approval_mode,
+    providers = providers,
+    permissions = permissions,
+    approvals = approvals,
+    truncated = boolean(raw.truncated),
+    manageable = M.wheel_manageable(host),
+  }
+end
+
+-- `bitty.wheel.preview(key, value)`.
+function M.preview_wheel(host, key, value)
+  local fn = wheel_fn(host, "preview")
+  if fn == nil then
+    return nil, M.error(M.CODE_UNAVAILABLE, "host has no wheel.preview surface")
+  end
+  local raw, err = invoke(fn, key, value)
+  if raw == nil then
+    return nil, err
+  end
+  return preview_result(raw, "wheel.preview")
+end
+
+-- `bitty.wheel.set(key, value, digest)`.
+function M.set_wheel(host, key, value, digest)
+  local fn = wheel_fn(host, "set")
+  if fn == nil then
+    return nil, M.error(M.CODE_UNAVAILABLE, "host has no wheel.set surface")
+  end
+  local raw, err = invoke(fn, key, value, digest)
+  if raw == nil then
+    return nil, err
+  end
+  return {
+    changed = raw.changed == nil and true or boolean(raw.changed),
+    applied = raw.applied == nil and true or boolean(raw.applied),
+    reload = text.field(raw.reload, 16),
+  }
+end
+
+-- `bitty.wheel.preview_auth_set(provider, api_key)`.
+function M.preview_wheel_auth_set(host, provider, api_key)
+  local fn = wheel_fn(host, "preview_auth_set")
+  if fn == nil then
+    return nil, M.error(M.CODE_UNAVAILABLE, "host has no wheel.preview_auth_set surface")
+  end
+  local raw, err = invoke(fn, provider, api_key)
+  if raw == nil then
+    return nil, err
+  end
+  return preview_result(raw, "wheel.preview_auth_set")
+end
+
+-- `bitty.wheel.auth_set(provider, api_key, digest)`.
+function M.wheel_auth_set(host, provider, api_key, digest)
+  local fn = wheel_fn(host, "auth_set")
+  if fn == nil then
+    return nil, M.error(M.CODE_UNAVAILABLE, "host has no wheel.auth_set surface")
+  end
+  local raw, err = invoke(fn, provider, api_key, digest)
+  if raw == nil then
+    return nil, err
+  end
+  return {
+    provider = text.field(raw.provider ~= nil and raw.provider or provider, M.MAX_NAME_BYTES),
+    configured = raw.configured == nil and true or boolean(raw.configured),
+    changed = raw.changed == nil and true or boolean(raw.changed),
+    applied = raw.applied == nil and true or boolean(raw.applied),
+    reload = text.field(raw.reload, 16),
+  }
+end
+
+-- `bitty.wheel.preview_auth_remove(provider)`.
+function M.preview_wheel_auth_remove(host, provider)
+  local fn = wheel_fn(host, "preview_auth_remove")
+  if fn == nil then
+    return nil, M.error(M.CODE_UNAVAILABLE, "host has no wheel.preview_auth_remove surface")
+  end
+  local raw, err = invoke(fn, provider)
+  if raw == nil then
+    return nil, err
+  end
+  return preview_result(raw, "wheel.preview_auth_remove")
+end
+
+-- `bitty.wheel.auth_remove(provider, digest)`.
+function M.wheel_auth_remove(host, provider, digest)
+  local fn = wheel_fn(host, "auth_remove")
+  if fn == nil then
+    return nil, M.error(M.CODE_UNAVAILABLE, "host has no wheel.auth_remove surface")
+  end
+  local raw, err = invoke(fn, provider, digest)
+  if raw == nil then
+    return nil, err
+  end
+  return {
+    provider = text.field(raw.provider ~= nil and raw.provider or provider, M.MAX_NAME_BYTES),
+    removed = boolean(raw.removed),
+    changed = boolean(raw.changed),
+    applied = raw.applied == nil and true or boolean(raw.applied),
+    reload = text.field(raw.reload, 16),
+  }
+end
+
+-- `bitty.wheel.preview_resolve_approval(id, decision)`.
+function M.preview_wheel_resolve_approval(host, id, decision)
+  local fn = wheel_fn(host, "preview_resolve_approval")
+  if fn == nil then
+    return nil, M.error(M.CODE_UNAVAILABLE, "host has no wheel.preview_resolve_approval surface")
+  end
+  local raw, err = invoke(fn, id, decision)
+  if raw == nil then
+    return nil, err
+  end
+  return preview_result(raw, "wheel.preview_resolve_approval")
+end
+
+-- `bitty.wheel.resolve_approval(id, decision, digest)`.
+function M.wheel_resolve_approval(host, id, decision, digest)
+  local fn = wheel_fn(host, "resolve_approval")
+  if fn == nil then
+    return nil, M.error(M.CODE_UNAVAILABLE, "host has no wheel.resolve_approval surface")
+  end
+  local raw, err = invoke(fn, id, decision, digest)
+  if raw == nil then
+    return nil, err
+  end
+  return {
+    id = text.field(raw.id ~= nil and raw.id or id, M.MAX_NAME_BYTES),
+    decision = text.field(raw.decision ~= nil and raw.decision or decision, 32),
+    resolved = raw.resolved == nil and true or boolean(raw.resolved),
+    changed = raw.changed == nil and true or boolean(raw.changed),
+    applied = raw.applied == nil and true or boolean(raw.applied),
+    reload = text.field(raw.reload, 16),
+  }
+end
+
 local function previous_rows(previous)
   local index = {}
   if previous == nil or type(previous.settings) ~= "table" then
@@ -837,6 +1152,15 @@ function M.collect(host, previous, sections)
       managed.profiles = profiles
     elseif M.is_blocked(profile_err) then
       return nil, profile_err
+    end
+  end
+
+  if sections.wheel == true and M.wheel_readable(host) then
+    local wheel, wheel_err = M.wheel(host)
+    if wheel ~= nil then
+      managed.wheel = wheel
+    elseif M.is_blocked(wheel_err) then
+      return nil, wheel_err
     end
   end
 
